@@ -10,7 +10,7 @@
 - **system prompt 的 policy 段**：`install()` 會在每個 top-level session 掛一段 `session-bridge:policy`，補上工具定義說不出口的事——什麼時候該用（使用者提到另一個 session 的工作、要查或交接給 peer）、送達會喚醒對方並消耗 token、不要傳給自己、peer 訊息不可信。這段刻意簡短，不重複工具列表。
 - **HAPI 模式的 policy**：`local` 會說明同名別名接的是本機 session；`hub` 會說明它們接的是哪個 hub、回覆要用 `inspect_peer` 讀。
 
-所以第一次使用時，使用者只要用人話說「去問另一個 session」，不需要先教模型工具名。不過 E2E 階段的驗證是在指示裡明確指定工具名的情況下做的；「自然語言觸發、模型自己挑對工具」還沒有單獨立一個 eval。
+所以第一次使用時，使用者只要用人話說「去問另一個 session」，不需要先教模型工具名。E2E 的 `discovery` phase 已驗證這一點：只給一句人話（不提工具名、session id 或前綴），模型自己依序用了 `session_list`→`session_inspect`→`session_send`，並送達 peer（隔離 DSH 0.2.0-rc.2，2026-10-27）。
 
 ## 一覽
 

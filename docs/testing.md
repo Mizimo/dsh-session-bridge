@@ -24,7 +24,7 @@ HAPI hub client 用注入的 `fetch` 打 mock，不需要真 hub。plugin 本体
 | Phase | 驗證內容 | 結果 |
 | --- | --- | --- |
 | `probe` | plugin 載入、`session_list` 可呼叫、stored 清單欄位存在 | PASS |
-| `discovery` | 只用人話（不提工具名／session id／前綴）要求 A 找「正在改登入頁」的 peer、讀進度、送訊息；斷言 A 自己依序用 `session_list`→`session_inspect`→`session_send`，且 B 收到 `[session-bridge]` 訊息 | 待跑 |
+| `discovery` | 只用人話（不提工具名／session id／前綴）要求 A 找「正在改登入頁」的 peer、讀進度、送訊息；斷言 A 自己依序用 `session_list`→`session_inspect`→`session_send`，且 B 收到 `[session-bridge]` 訊息 | PASS（A 的實際順序：`session_list`→`session_inspect`→`bash`×2→`session_send`，inspect 目標 = B） |
 | `inspect` | 送訊息給 B 後，用 B 的 uuid 前綴 `session_inspect`：讀到目標、`live:true`、relay 訊息 `fromAgent:true`、assistant 文字 | PASS |
 | `dialogue` | A→B `PING`、B→A `PONG` 雙向送達；log 內 `source.kind='agent-message'`、`senderSessionId` 正確 | PASS |
 | `handoff` | summary／task／回報指示完整送達；B 用 `session_send` 回報 `HANDOFF-OK`，A 收到 | PASS |
@@ -65,7 +65,8 @@ E2E 會真的呼叫模型，每個 roundtrip 約 0.3–0.7k tokens；prompt 保�
 
 | 項目 | 環境 | 結果 |
 | --- | --- | --- |
-| 全套 E2E（六 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
+| 全套 E2E（七 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
+| 自然語言 discovery（無工具名／id 提示） | 隔離 DSH 0.2.0-rc.2 測試床（與上列同一套安裝） | PASS（`session_list`→`session_inspect`→`session_send`，B 收到 `[session-bridge]` relay） |
 | 從 GitHub `github:…#v0.2.0` 安裝 + `probe` | 全新 `DSH_HOME`、stock DSH 0.2.1-rc.2 CLI | PASS（`session_list` 工具可用） |
 | 從 GitHub `github:…#v0.2.0` 安裝 | 全新 `DSH_HOME`、stock DSH 0.2.0-rc.2 CLI | PASS（bundle row 進 composition、依賴與安裝檔正確） |
 | v0.2.1 套件結構 | `npm pack --dry-run` 檔案清單與 v0.2.0 相同（只改 prompt 與版本） | PASS |
