@@ -34,7 +34,7 @@ Host-only bundle。沒有 client 半，沒有 build step。<br>
 ## 安裝
 
 ```sh
-dsh plugin --profile web add github:Mizimo/dsh-session-bridge#v0.2.0
+dsh plugin --profile web add github:Mizimo/dsh-session-bridge#v0.2.1
 ```
 
 裝完**重啟該 profile 的 dsh process**，開一個新 session，確認 agent 有 `session_list` 就生效了。

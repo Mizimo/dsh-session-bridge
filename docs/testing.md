@@ -66,6 +66,7 @@ E2E 會真的呼叫模型，每個 roundtrip 約 0.3–0.7k tokens；prompt 保�
 | 全套 E2E（六 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
 | 從 GitHub `github:…#v0.2.0` 安裝 + `probe` | 全新 `DSH_HOME`、stock DSH 0.2.1-rc.2 CLI | PASS（`session_list` 工具可用） |
 | 從 GitHub `github:…#v0.2.0` 安裝 | 全新 `DSH_HOME`、stock DSH 0.2.0-rc.2 CLI | PASS（bundle row 進 composition、依賴與安裝檔正確） |
+| v0.2.1 套件結構 | `npm pack --dry-run` 檔案清單與 v0.2.0 相同（只改 prompt 與版本） | PASS |
 | 單元測試 | Node 20／22／24（GitHub Actions） | PASS |
 | HAPI wire | 與 HAPI 0.31.2 原始碼比對；0.30.7 實測 | 用到的 route 相同 |
 

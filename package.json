@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cross-session messaging and handoff for DeepSeek Harness: let the agents of different DSH sessions talk to each other, inspect peer logs, and interoperate with a HAPI hub.",
   "license": "MIT",
   "author": "Mizimo",
