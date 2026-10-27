@@ -13,6 +13,7 @@
 | `refs.js` | session reference 解析：citation 抽取、id／前綴匹配、ambiguous 判斷。 |
 | `cordis.patch.yml` | bundle 的 patch 層：插入 `session-bridge` row（optional）。 |
 | `locale/`、`icon.svg` | 插件管理介面用的顯示資源。 |
+| `test-support/` | `index.js` 單元測試的 loader、DSH peer dependency stubs 與 fake host helpers（不隨套件發佈）。 |
 | `test/`、`e2e/` | 單元測試與隔離測試床（不隨套件發佈）。 |
 
 ## 生命週期
@@ -77,18 +78,18 @@ fallback 以 host context 與 session id 共用執行中的 Promise，並行送�
 ## Reference 解析
 
 - `normalizeSessionRef()`：先 trim；若字串含 `/sessions/`，抽出其中 id；抽出多個不同 id 時回空字串（fail closed），只有一個才使用。
-- `matchSessionRef()`：完整 id 優先，其次唯一前綴；多個匹配回 `ambiguous`，沒有匹配回 `missing`。本機解析設定至少 8 碼的可變 id 部分，過短回 `tooShort`。
+- `matchSessionRef()`：精確 id 匹配優先且不受前綴最短長度限制，其次唯一前綴；多個匹配回 `ambiguous`，沒有匹配回 `missing`。本機解析設定至少 8 碼的可變 id 部分，過短回 `tooShort`。
 - DSH id 是 `session-<uuid>`，所以額外接受「只給 uuid 前綴」的形式（補上 `session-` 再比對），GUI／API 常見的裸 uuid 也能用。
 - `resolveSessionRefInfo()` 保留候選 metadata 與解析出的 id；只有相關列舉服務不可用時，才允許 `isFullSessionId()` 驗證過的完整 id 繼續交給 host。完整列舉後找不到目標就直接報錯。
 
 ## HAPI hub client
 
-- 建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`。`auto` 模式退回 local 別名；明確指定 hub 模式則停用 HAPI 別名，保留原生工具。
+- `auto` 在有 `hapiHub` 區塊或 `HAPI_API_URL` + `CLI_API_TOKEN` 都非空白時才選 hub。建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`。建立失敗會印 warning：`auto` 退回 local 別名；明確指定 hub 則停用 HAPI 別名，保留原生工具。
 - `POST /api/auth` 換 JWT，single-flight 快取；任何請求遇到 401 會重認證一次再重試。
 - 每次呼叫有 timeout（一般 20s、auth 10s、resume／send 30s）；`TimeoutError` 對應 `timeout`、呼叫端取消對應 `disabled`。
 - `inspect_peer` 先用 list 解析前綴，再 `GET /:id` 取最新 metadata，最後讀 messages——不 resume。
 - `ping_peer` 解析目標後先確保 active：必要時 `POST /resume` → 輪詢 active（2s／最多 60s）；pi flavor 另外等 `metadata.piSessionId`。送訊息用穩定 `localId`；409 `session_inactive` 會重新確認後重送一次。
-- 所有 hub 錯誤轉成有型別的 `HapiHubError`，讓模型看到 `not_found`／`ambiguous`／`timeout` 等可操作訊息。
+- 所有 hub 錯誤轉成有型別的 `HapiHubError`；連線失敗或 HTTP 5xx 是 `unavailable`，401／403 或認證交換失敗是 `auth_failed`，另有 `not_found`／`ambiguous`／`timeout` 等可操作訊息。
 
 ## 設計取捨與失敗窗口
 

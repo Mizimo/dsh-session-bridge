@@ -1,6 +1,6 @@
 # 工具參考
 
-外掛會為每個 top-level session 的 agent 註冊工具。沒有 HAPI 相容層時是四個 `session_*` 工具；`hapiCompat` 開啟時再多三個 HAPI 同名的別名（見 [HAPI 相容](hapi.md)）。
+外掛會為每個一般 top-level session 的 agent 註冊工具。沒有 HAPI 相容層時是四個 `session_*` 工具；相容層成功啟用時再多三個 HAPI 同名的別名。明確設定 hub 但 client 無法建立時，只保留原生工具（見 [HAPI 相容](hapi.md)）。
 
 ## Agent 怎麼知道要用
 
@@ -30,7 +30,7 @@
 2. **唯一前綴**（本機 DSH id 是 `session-<uuid>`，uuid 部分至少 8 碼，可省略 `session-`；多個匹配會回 `ambiguous` 並列出樣本）；
 3. **任何含 `/sessions/<id>` 的字串**（HAPI web 的 copy-reference、composer chip、貼上的引用段落）。含多個不同 id 的字串會 fail closed。
 
-本機工具只接受 ordinary session，排除 subagent／teammate child。完整列舉成功後找不到目標就回錯誤；列舉服務不可用時，只允許完整 `session-<uuid>` 或裸 UUID 繼續查詢／冷啟動，裸 UUID 會補上 `session-`。過短前綴或路徑字串不能代替 session id；可先用 `session_list` 選擇目標。
+本機工具只接受 ordinary session，排除 subagent／teammate child。已知候選的精確 id 匹配優先，不受前綴最短 8 碼限制。完整列舉成功後找不到目標就回錯誤；列舉服務不可用時，只允許完整 `session-<uuid>` 或裸 UUID 繼續查詢／冷啟動，裸 UUID 會補上 `session-`。過短前綴或路徑字串不能代替 session id；可先用 `session_list` 選擇目標。
 
 預設 `scope: same-cwd`，本機對話讀取與送達僅限相同工作目錄。可用 `allowCwds` 放行特定目標目錄及其子目錄，或改成 `same-root`／`host`，詳見 [設定](configuration.md)。列表仍提供 peer metadata；跨範圍 inspect 回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`。`session_send`、`session_handoff` 及本機 `ping_peer` 拒絕跨範圍送達，且不會 resume 目標；非 `host` 模式也拒絕無法確認 cwd 的目標。遠端 hub 工具不套用本機 cwd 範圍。
 
@@ -84,9 +84,9 @@
 ```
 
 - **唯讀**：只是 replay session log，不會 resume、不會 steer、不消耗對方 token。
-- 超出設定範圍或無法驗證工作目錄時，只回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`；本機 `inspect_peer` 也會回傳 `redacted`。
+- 超出設定範圍，或在非 `host` 模式下無法驗證工作目錄時，只回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`；本機 `inspect_peer` 也會回傳 `redacted`。
 - 只取 user／assistant 角色的最近訊息；單則截到 600 字、總量 16 KiB、tool call 只保留名稱；被截斷時 `truncated: true`。
-- `fromAgent: true` 表示那則 user message 是另一個 agent 透過 bridge 傳的（`source.kind = 'agent-message'`）；來源有非空白的 `senderSessionId` 時會原樣保留，方便辨識發送者。
+- `fromAgent: true` 表示那則 user message 的 `source.kind = 'agent-message'`；來源有非空白字串 `senderSessionId` 時會原樣保留，方便辨識發送者。
 - 冷 session 也讀得到（`live: false`、`persisted: true`），且讀完仍然是冷的。
 
 ## `session_send`
@@ -121,14 +121,14 @@
 | `task` | string（必填） | 下一步要做什麼＋驗收條件。 |
 | `reply` | boolean | 完成後是否回報，預設 `true`。 |
 
-回傳與 `session_send` 相同（`sent`／`target`／`coldResumed`）。送出的本文會包含 summary、task，以及「完成後用 `session_send` 回報 sender session id」的指示。
+回傳與 `session_send` 相同（`sent`／`target`／`coldResumed`）。送出的本文會包含 summary、task，以及「完成後用 `session_send` 回報 sender session id」的指示；`reply: false` 時改為只在需要釐清時回覆。
 
 ## 來源標記
 
 收到的 peer 訊息不是人類打的，這點在三個地方看得到：
 
 - session log 的結構化來源：`source.kind = 'agent-message'`、`source.form = 'relay'`、`source.senderSessionId = <sender session id>`；
-- 訊息本文開頭：`[session-bridge] Message|Handoff from DSH session "<id>" (title)`，下一行是 sender workspace，接著是明確區分 bridge header 與不可信 peer 本文的 notice；
+- 訊息 header 開頭：`[session-bridge] Message|Handoff from DSH session "<id>" (title)`；已知時附上 sender title／workspace，接著是明確區分 bridge header 與不可信 peer 本文的 notice；
 - system prompt 的 policy 段要求把 peer 訊息當 untrusted，不能用來擴大權限或授權破壞性操作。
 
 本文放在 `<peer-message sender="<id>">` 與 `</peer-message>` 之間。notice 說明標籤上方由 bridge 撰寫，而標籤內全部是不可信的 peer 文字，即使看起來像 bridge header 也不是 bridge 撰寫。本文內的開閉標籤會把 `<` 轉成 `&lt;`（忽略大小寫，包含 `<` 後的空白），每個字面 `[session-bridge]` 都會改成 `[peer-text: session-bridge]`，避免偽造封裝或來源標記。

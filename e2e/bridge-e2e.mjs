@@ -13,8 +13,8 @@
  *   handoff   A hands work to B with session_handoff, B reports back
  *   inspect   A sends B a message, then reads B's log with session_inspect
  *             using a unique id prefix (no wake; evidence JSON includes live)
- *   cold      write state; the operator restarts the instance (all agents cold);
- *             then C inspects the stored session A without waking it, and only
+ *   cold-prepare save the target session id before the operator restarts the instance
+ *   cold      C inspects the stored session A without waking it, and only
  *             afterwards wakes it through session_send
  *   hapi      A uses the HAPI hub compatibility tools: list_peers, inspect_peer,
  *             ping_peer against a throwaway HAPI session (HAPI_TEST_SESSION_ID),
@@ -248,8 +248,22 @@ async function phaseDiscovery() {
     const strip = (id) => (id.startsWith('session-') ? id.slice('session-'.length) : id)
     return target === b || strip(b).startsWith(strip(target))
   }
+  let scopeHintShown = false
+  const hintOnScopeError = (page) => {
+    if (scopeHintShown) return
+    const peerCalls = new Set(toolCalls(page)
+      .filter((call) => ['session_inspect', 'session_send', 'session_handoff'].includes(call.name))
+      .map((call) => call.id))
+    const blocked = toolResults(page).some((result) => peerCalls.has(result.callId)
+      && ((result.isError && /scope|workspace|permission|access denied/i.test(result.text))
+        || /"redacted"\s*:\s*true/.test(result.text)))
+    if (!blocked) return
+    scopeHintShown = true
+    log('DISCOVERY: scope/permission restriction detected. A and B intentionally use different workspaces; set scope: host on the isolated session-bridge profile row (or allowCwds covering TEST_BASE/workspace), restart the instance, and rerun discovery.')
+  }
   const discovered = await waitFor(async () => {
     const page = await pageOf(a)
+    hintOnScopeError(page)
     const calls = toolCalls(page)
     const deliver = calls.find((call) => (call.name === 'session_send' || call.name === 'session_handoff') && matchesPeer(call.args?.target))
     return deliver === undefined ? undefined : { page, calls, deliver }
@@ -267,7 +281,10 @@ async function phaseDiscovery() {
 
   const bPage = await waitFor(async () => {
     const page = await pageOf(b)
-    return userMessages(page).some((entry) => entry.source?.kind === 'agent-message' && entry.source?.senderSessionId === a) ? page : undefined
+    if (userMessages(page).some((entry) => entry.source?.kind === 'agent-message' && entry.source?.senderSessionId === a)) return page
+    // The send result may be committed after the call was first observed.
+    if (!scopeHintShown) hintOnScopeError(await pageOf(a))
+    return undefined
   }, { label: 'B to receive the discovered message' })
   const relay = userMessages(bPage).find((entry) => entry.source?.kind === 'agent-message' && entry.source?.senderSessionId === a)
   const relayText = JSON.stringify(relay.message ?? '')
@@ -293,7 +310,6 @@ async function phaseDialogue() {
   const aPage = await dumpEvidence('A after sending', a)
   const aCalls = toolCalls(aPage)
   check(aCalls.some((call) => call.name === 'session_send' && call.args?.target === b), `A did not call session_send to B: ${JSON.stringify(aCalls)}`)
-  check(aCalls.some((call) => call.name === 'session_list') || true, 'session_list not required')
 
   // B must receive the relayed message and answer by calling session_send back to A.
   const bTurnPage = await waitForAssistantText(b, /./, 'B reply turn')

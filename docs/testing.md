@@ -33,30 +33,37 @@ npm test
 
 在**隔離的 DSH instance** 上跑（獨立 `DSH_HOME`、loopback 專用 port、不動主要 DSH service）。詳細的測試床架構、安全規則與踩過的坑見 [`e2e/README.md`](../e2e/README.md) 與 [`e2e/testbed-notes.md`](../e2e/testbed-notes.md)。
 
+`discovery` 刻意讓 A 在 `$TEST_BASE/workspace`、B 在其 `login-page-<token>` 子目錄；安裝後需在隔離 profile 的 `session-bridge` row 設 `scope: host`，再重啟。也可保留 `same-cwd`，以 `allowCwds` 放行測試 workspace 的實際絕對路徑。其他本機 phase 使用相同 cwd，遠端 `hapi` 不受本機 scope 影響；產品預設仍是 `same-cwd`。
+
 ### Phase 與驗證內容
+
+共八個 phase，以下結果是既有測試床的驗證紀錄。
 
 | Phase | 驗證內容 | 結果 |
 | --- | --- | --- |
 | `probe` | plugin 載入、`session_list` 可呼叫、stored 清單欄位存在 | PASS |
-| `discovery` | 只用人話（不提工具名／session id／前綴）要求 A 找「正在改登入頁」的 peer、讀進度、送訊息；斷言 A 自己依序用 `session_list`→`session_inspect`→`session_send`，且 B 收到 `[session-bridge]` 訊息 | PASS（A 的實際順序：`session_list`→`session_inspect`→`bash`×2→`session_send`，inspect 目標 = B） |
+| `discovery` | 只用人話（不提工具名／session id／前綴）要求 A 找「正在改登入頁」的 peer、讀進度、送訊息；需呼叫 `session_list`，在送達前先 `session_inspect`，再以 `session_send` 或 `session_handoff` 送達 B，且 B 收到 `[session-bridge]` 訊息 | PASS（A 的實際順序：`session_list`→`session_inspect`→`bash`×2→`session_send`，inspect 目標 = B） |
 | `inspect` | 送訊息給 B 後，用 B 的 uuid 前綴 `session_inspect`：讀到目標、`live:true`、relay 訊息 `fromAgent:true`、assistant 文字 | PASS |
 | `dialogue` | A→B `PING`、B→A `PONG` 雙向送達；log 內 `source.kind='agent-message'`、`senderSessionId` 正確 | PASS |
 | `handoff` | summary／task／回報指示完整送達；B 用 `session_send` 回報 `HANDOFF-OK`，A 收到 | PASS |
+| `cold-prepare` | 從既有 state 讀取 A，將其 id 儲存為 `coldTarget`，提示操作者重啟 instance | PASS |
 | `cold` | 重啟 instance（全冷）→ C 先 `session_inspect` 冷 A（`live:false`，且 A 仍冷）→ C 送訊息 → `coldResumed:true` 喚醒 → A 回 `COLD-PONG` → C 收到 | PASS |
 | `hapi` | `list_peers`／`inspect_peer`／`ping_peer` 對拋棄式 HAPI session；hub API 直接驗證訊息送達、`[session-bridge]` 前綴、sender id 正確 | PASS |
 
 ### 怎麼跑
 
 ```sh
-# 1. 起隔離 instance
+# 1. 起隔離 instance（DSH_BIN 未設定時從 PATH 找 dsh）
+export TEST_BASE=$HOME/session-bridge-test
 ./e2e/start-test-instance.sh
 
-# 2. 裝 plugin、重啟讓 bundle 生效
+# 2. 裝 plugin；在隔離 profile 的 session-bridge row 設 config: {scope: host}
 ./e2e/install-plugin-bundle.sh /abs/path/to/dsh-session-bridge
+# 合併設定後重啟，讓 bundle 與 discovery 的 scope 設定生效
 ./e2e/stop-test-instance.sh && ./e2e/start-test-instance.sh
 
 # 3. 依序跑 phase
-export DSH_WEB_URL=http://127.0.0.1:3099 TEST_BASE=$HOME/session-bridge-test
+export DSH_WEB_URL=http://127.0.0.1:3099
 node e2e/bridge-e2e.mjs probe
 node e2e/bridge-e2e.mjs discovery
 node e2e/bridge-e2e.mjs inspect
@@ -79,7 +86,7 @@ E2E 會真的呼叫模型，每個 roundtrip 約 0.3–0.7k tokens；prompt 保�
 
 | 項目 | 環境 | 結果 |
 | --- | --- | --- |
-| 全套 E2E（七 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
+| 全套 E2E（八個 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
 | 自然語言 discovery（無工具名／id 提示） | 隔離 DSH 0.2.0-rc.2 測試床（與上列同一套安裝） | PASS（`session_list`→`session_inspect`→`session_send`，B 收到 `[session-bridge]` relay） |
 | 從 GitHub `github:…#v0.2.0` 安裝 + `probe` | 全新 `DSH_HOME`、stock DSH 0.2.1-rc.2 CLI | PASS（`session_list` 工具可用） |
 | 從 GitHub `github:…#v0.2.0` 安裝 | 全新 `DSH_HOME`、stock DSH 0.2.0-rc.2 CLI | PASS（bundle row 進 composition、依賴與安裝檔正確） |

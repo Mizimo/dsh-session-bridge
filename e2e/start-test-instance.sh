@@ -2,14 +2,13 @@
 # start-test-instance.sh — boot an ISOLATED, throwaway DSH web instance on the test machine.
 #
 #   host: 127.0.0.1:3099 (loopback only, never a firewall/tailnet port)
-#   home: ~/session-bridge-test/home   (separate DSH_HOME; the real ~/.dsh is NOT read/written)
+#   home: ~/session-bridge-test/home   (separate DSH_HOME; only copies provider credentials from ~/.dsh)
 #   log:  ~/session-bridge-test/logs/test-instance.log
 #
 # Safe by construction:
 #   - refuses to run at all if TEST_PORT is 3080 (the machine's main DSH web service)
 #   - refuses if anything already listens on the test port
-#   - reuses the same @deepseek-ai/dsh npx install as the main service, so both
-#     run byte-identical code (including the local auth-short-circuit patch)
+#   - uses DSH_BIN when set, otherwise the dsh executable on PATH
 #
 # Usage: ./start-test-instance.sh
 set -euo pipefail
@@ -17,14 +16,17 @@ set -euo pipefail
 BASE="${TEST_BASE:-$HOME/session-bridge-test}"
 PORT="${TEST_PORT:-3099}"
 HOST="${TEST_HOST:-127.0.0.1}"
-DSH_BIN="${DSH_BIN:-$HOME/.npm/_npx/7eff65a5cfe9d1d1/node_modules/.bin/dsh}"
+if [ "${DSH_BIN+x}" != x ]; then
+  DSH_BIN="$(command -v dsh || true)"
+fi
 LOG="$BASE/logs/test-instance.log"
 
 die() { echo "start-test-instance: ERROR: $*" >&2; exit 1; }
 info() { echo "start-test-instance: $*"; }
 
 [ "$PORT" = "3080" ] && die "TEST_PORT=3080 is the machine's main DSH web service port; refusing"
-[ -x "$DSH_BIN" ] || die "dsh binary not found at $DSH_BIN (override with DSH_BIN=...)"
+[ -n "$DSH_BIN" ] || die "dsh not found on PATH; set DSH_BIN=/absolute/path/to/dsh"
+[ -x "$DSH_BIN" ] || die "dsh is not executable: $DSH_BIN; set DSH_BIN=/absolute/path/to/dsh"
 command -v setsid >/dev/null || die "setsid not found"
 
 # 0. Never start a second copy if the test port is already taken.
@@ -33,8 +35,10 @@ if ss -tln 2>/dev/null | grep -q "${HOST}:${PORT} "; then
 fi
 
 # 1. Isolated layout.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$BASE/home" "$BASE/workspace" "$BASE/logs" "$BASE/bin"
 chmod 700 "$BASE" "$BASE/home"
+install -m 755 "$SCRIPT_DIR/stop-test-instance.sh" "$BASE/bin/stop-test-instance.sh"
 
 # 2. Credentials for the isolated home: an owner-only COPY of the real provider
 #    credentials, so the test instance never writes into ~/.dsh and the real
@@ -78,8 +82,8 @@ fi
      setsid --fork "$DSH_BIN" web --no-open --host "$HOST" --port "$PORT" \
      >>"$LOG" 2>&1 < /dev/null )
 
-# 5. Wait for readiness (GET / -> 200). The auth-short-circuit patch is already
-#    applied inside the npx install, so no ?token= exchange is needed.
+# 5. Wait for readiness (GET / -> 200). Stock installs may still require a
+#    browser-token exchange before the harness can call /api (see README.md).
 for _ in $(seq 1 60); do
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://${HOST}:${PORT}/" 2>/dev/null || true)"
   [ "$code" = "200" ] && break

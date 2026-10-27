@@ -7,7 +7,7 @@
 **讓 DSH 裡不同 session 的 agent 互相傳訊息、讀對方的進度、把工作交棒。**
 
 Host-only bundle。沒有 client 半，沒有 build step。<br>
-裝進 profile 之後，每個 session 的 agent 就多一組可以直接對話的工具。
+裝進 profile 之後，每個一般頂層 session 的 agent 就多一組可以直接對話的工具。
 
 ![DSH 0.2.x](https://img.shields.io/badge/DSH-0.2.x-5a64a3?style=flat-square&labelColor=313157)
 ![HAPI 0.30/0.31](https://img.shields.io/badge/HAPI-0.30%2F0.31-6a89d5?style=flat-square&labelColor=313157)
@@ -27,9 +27,9 @@ Host-only bundle。沒有 client 半，沒有 build step。<br>
 | `session_send` | 送一則訊息；對方 idle 會開新 turn，running 則在下一個 step 邊界收到 |
 | `session_handoff` | 把 summary 和下一步一起交出去，預設要求對方完成後回報 |
 
-`session_inspect` 對冷 session 也有效；`session_send` 會把它 resume 成 live agent（回傳 `coldResumed: true`）。收到的訊息在 session log 裡帶 `agent-message`／`relay` 來源，本文開頭也有 `[session-bridge]` 標記。
+在允許的範圍內，`session_inspect` 對冷 session 也有效；`session_send` 會把它 resume 成 live agent（回傳 `coldResumed: true`）。收到的訊息在 session log 裡帶 `agent-message`／`relay` 來源；`[session-bridge]` header 下方以 `<peer-message sender="...">...</peer-message>` 封裝不可信的 peer 本文，本文內的 bridge marker 會轉義。
 
-預設範圍是 `same-cwd`：本機跨工作目錄協作需設定 `allowCwds` 或 `scope: host`，見 [設定](docs/configuration.md)。
+預設範圍是 `same-cwd`：跨範圍 inspect 只回 metadata、空訊息與 `redacted: true`，送達會拒絕且不 resume。本機跨工作目錄協作可設定 `allowCwds` 或 `scope: same-root`／`host`；預設 loop guard 限制每組 sender → target 在 60 秒內 10 則，見 [設定](docs/configuration.md)。
 
 需要 HAPI 的 `list_peers`／`inspect_peer`／`ping_peer` 時，同一組名字可以接本機 DSH session，也可以接真正的 HAPI hub；模式和限制見 [HAPI 相容](docs/hapi.md)。
 

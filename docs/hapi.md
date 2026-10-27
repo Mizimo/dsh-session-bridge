@@ -13,7 +13,7 @@
 | `hub` | 真正的 HAPI hub REST API | DSH 要跟 HAPI 上的 session 對話。 |
 | `false`／`none` | 不註冊別名，只留原生 `session_*` | 不想讓模型看到兩套名字。 |
 
-`HAPI_DISABLE_PEER_TOOLS=1|true|yes` 時也不註冊（跟 HAPI 自己的 kill switch 一致）。
+`HAPI_DISABLE_PEER_TOOLS` 為 `1`／`true`／`yes` 時也不註冊，忽略前後空白與大小寫；與 `DSH_SESSION_BRIDGE_DISABLE` 使用相同解析規則，但只關閉 HAPI 別名。
 
 hub mode 需要的設定：
 
@@ -32,6 +32,8 @@ hub mode 需要的設定：
 
 `local` 模式的 `list_peers.active` 表示 session 已在記憶體中、可直接接收訊息；live session 即使 idle 也回 `true`，stored session 回 `false`。執行中／閒置的區別仍由原生 `session_list` 的 `status` 表示。
 
+local 別名沿用原生工具的最短 8 碼可變 id 前綴、`same-cwd` scope 與 loop guard。跨範圍 `inspect_peer` 只回 metadata、`messages: []`、`truncated: false` 與 `redacted: true`；`ping_peer` 拒絕送達且不 resume。精確 id 匹配不受前綴最短長度限制，完整解析規則見 [工具參考](tools.md#target-寫法)。
+
 `hub` 模式的行為對齊 HAPI：
 
 - id 以**唯一前綴**解析；撞號回 `ambiguous`，找不到回 `not_found`。
@@ -48,7 +50,7 @@ hub mode 需要的設定：
 | `POST /api/auth` `{accessToken}` → `{token}` | 換 JWT（4 小時），client 會 single-flight 快取，401 時重認證一次。 |
 | `GET /api/sessions?limit=&order=updatedAt` | list peers；namespace 由 token／`extraHeaders` 決定。 |
 | `GET /api/sessions/:id` | 單一 session metadata（`active`、`metadata.name/path/flavor/lifecycleState/summary`）。 |
-| `GET /api/sessions/:id/messages?limit=` | 最近訊息（預設 50、上限 200）；只取 user／assistant 文字。 |
+| `GET /api/sessions/:id/messages?limit=` | 本 client 請求最近訊息，`messageLimit` 預設 30、上限 100；只取 user／assistant 文字。 |
 | `POST /api/sessions/:id/resume` `{}` | 喚醒 inactive session；回 `{type:'success'}` 或錯誤。 |
 | `POST /api/sessions/:id/messages` `{text, localId}` | 送訊息；session 必須 active。 |
 

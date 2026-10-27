@@ -25,7 +25,7 @@
 | 欄位 | 型別 | 預設 | 說明 |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | `false` 時完全不註冊工具（含 system prompt 段）。 |
-| `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
+| `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／local 與 hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
 | `scope` | `same-cwd` \| `same-root` \| `host` | `same-cwd` | 本機對話讀取與送達範圍；`same-cwd` 要求相同工作目錄，`same-root` 另允許互為祖先／子目錄，`host` 允許同 host 的 ordinary sessions。無效值使用 `same-cwd`。 |
 | `allowCwds` | string[] | `[]` | 額外允許的目標工作目錄及其子目錄。展開開頭的 `~/`，再以 `path.resolve()` 轉為絕對路徑；相對路徑以 host process 的 cwd 為準，無效項目忽略。 |
 | `loopGuard` | `false` \| object | `{ windowMs: 60000, maxMessages: 10 }` | 每組有方向性的 sender → target，在滑動時間窗內最多送出的訊息數；`false` 關閉限制。 |
@@ -34,7 +34,7 @@
 
 `auto` 只有在存在 `hapiHub` 區塊，或 `HAPI_API_URL` 與 `CLI_API_TOKEN` 都非空白時才選擇 hub；單獨設定其中一個環境變數仍使用 local。hub client 建立失敗時，`auto` 會印 warning 並退回 local 別名；明確設定 `hapiCompat: hub` 則印 warning 並停用三個 HAPI 同名工具，保留原生 `session_*` 工具。
 
-本機範圍以正規化後的目錄路徑比較；`same-root` 不代表尋找 Git root，同層的兄弟目錄不會因此互通。`allowCwds` 只放行指定目標目錄及其子目錄，`/work/proj2` 不屬於 `/work/proj`。除了 `host` 模式，雙方都必須有可驗證的 cwd；缺少 cwd 時，即使有 allowlist 也不會盲目 resume。超出範圍的 inspect 保留 metadata 並回 `redacted: true`，送達則直接拒絕。遠端 HAPI hub 目標不套用本機 cwd 範圍。
+本機範圍以正規化後的目錄路徑比較；`same-root` 不代表尋找 Git root，同層的兄弟目錄不會因此互通。`allowCwds` 只放行指定目標目錄及其子目錄，`/work/proj2` 不屬於 `/work/proj`。除了 `host` 模式，雙方都必須有可驗證的 cwd；缺少 cwd 時，即使有 allowlist 也不會盲目 resume。超出範圍的 `session_inspect`／local `inspect_peer` 保留 metadata，回 `messages: []`、`truncated: false` 與 `redacted: true`；`session_send`／`session_handoff`／local `ping_peer` 則直接拒絕且不 resume。遠端 HAPI hub 目標不套用本機 cwd 範圍。
 
 `loopGuard.windowMs` 與 `loopGuard.maxMessages` 各自接受正的 safe integer，無效值分別使用 60000 毫秒與 10 則。原生工具及本機別名共用配對計數，hub `ping_peer` 也受限制；反向回覆是另一組配對。計數僅存在這次 plugin 啟用的記憶體中，重新啟動後歸零。
 
@@ -53,7 +53,7 @@
 
 | 變數 | 作用 |
 | --- | --- |
-| `DSH_SESSION_BRIDGE_DISABLE` | 全域 kill switch，優先於 row config；`1`／`true`／`yes`，忽略前後空白與大小寫。 |
+| `DSH_SESSION_BRIDGE_DISABLE` | 全域 kill switch，優先於 row config；僅字串值去除前後空白並轉小寫後為 `1`／`true`／`yes` 時啟用，其他值不啟用。 |
 | `HAPI_API_URL` | hub URL（`hapiCompat` 為 `hub`／`auto` 時）。 |
 | `CLI_API_TOKEN` | HAPI CLI access token；**建議用這個而不是把 token 寫進 YAML**。 |
 | `HAPI_EXTRA_HEADERS_JSON` | JSON 物件，附加到每個 hub 請求。 |
