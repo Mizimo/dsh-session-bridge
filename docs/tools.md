@@ -27,8 +27,10 @@
 `target`（`session_*`）與 `sessionIdPrefix`（HAPI 別名）都接受：
 
 1. **完整 session id**（例如 `session-3f2a1b9c-…`）；
-2. **唯一前綴**（DSH id 是 `session-<uuid>`，給前 8 碼 uuid 或 `session-` + 8 碼都可以；多個匹配會回 `ambiguous` 並列出樣本）；
+2. **唯一前綴**（本機 DSH id 是 `session-<uuid>`，uuid 部分至少 8 碼，可省略 `session-`；多個匹配會回 `ambiguous` 並列出樣本）；
 3. **任何含 `/sessions/<id>` 的字串**（HAPI web 的 copy-reference、composer chip、貼上的引用段落）。含多個不同 id 的字串會 fail closed。
+
+本機工具只接受 ordinary session，排除 subagent／teammate child。完整列舉成功後找不到目標就回錯誤；列舉服務不可用時，只允許完整 `session-<uuid>` 或裸 UUID 繼續查詢／冷啟動，裸 UUID 會補上 `session-`。過短前綴或路徑字串不能代替 session id；可先用 `session_list` 選擇目標。
 
 ## `session_list`
 
@@ -72,7 +74,7 @@
     "createdAt": 1793085000000, "updatedAt": 1793085768794
   },
   "messages": [
-    { "role": "user", "seq": 30, "time": 1793085768000, "text": "…", "fromAgent": true },
+    { "role": "user", "seq": 30, "time": 1793085768000, "text": "…", "fromAgent": true, "senderSessionId": "session-sender-…" },
     { "role": "assistant", "seq": 32, "time": 1793085770000, "text": "…" }
   ],
   "truncated": false
@@ -81,7 +83,7 @@
 
 - **唯讀**：只是 replay session log，不會 resume、不會 steer、不消耗對方 token。
 - 只取 user／assistant 角色的最近訊息；單則截到 600 字、總量 16 KiB、tool call 只保留名稱；被截斷時 `truncated: true`。
-- `fromAgent: true` 表示那則 user message 是另一個 agent 透過 bridge 傳的（`source.kind = 'agent-message'`）。
+- `fromAgent: true` 表示那則 user message 是另一個 agent 透過 bridge 傳的（`source.kind = 'agent-message'`）；來源有非空白的 `senderSessionId` 時會原樣保留，方便辨識發送者。
 - 冷 session 也讀得到（`live: false`、`persisted: true`），且讀完仍然是冷的。
 
 ## `session_send`

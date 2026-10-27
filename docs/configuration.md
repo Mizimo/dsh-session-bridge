@@ -21,8 +21,10 @@
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | `false` 時完全不註冊工具（含 system prompt 段）。 |
 | `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
-| `hapiCompat` | `auto` \| `local` \| `hub` \| `false` | `auto` | HAPI 同名工具要接到哪裡；見 [HAPI 相容](hapi.md)。 |
-| `hapiHub` | object | — | 只有 `hub` 模式需要，欄位見下。 |
+| `hapiCompat` | `auto` \| `local` \| `hub` \| `false` \| `none` | `auto` | HAPI 同名工具要接到哪裡；見 [HAPI 相容](hapi.md)。 |
+| `hapiHub` | object | — | hub client 設定；存在這個區塊時，`auto` 會選擇 hub。欄位見下。 |
+
+`auto` 只有在存在 `hapiHub` 區塊，或 `HAPI_API_URL` 與 `CLI_API_TOKEN` 都非空白時才選擇 hub；單獨設定其中一個環境變數仍使用 local。hub client 建立失敗時，`auto` 會印 warning 並退回 local 別名；明確設定 `hapiCompat: hub` 則印 warning 並停用三個 HAPI 同名工具，保留原生 `session_*` 工具。
 
 `hapiHub` 欄位（全部可選，憑證可改用環境變數）：
 
@@ -39,12 +41,12 @@
 
 | 變數 | 作用 |
 | --- | --- |
-| `DSH_SESSION_BRIDGE_DISABLE=1` | 全域 kill switch，優先於 row config；`1` 或 `true`。 |
+| `DSH_SESSION_BRIDGE_DISABLE` | 全域 kill switch，優先於 row config；`1`／`true`／`yes`，忽略前後空白與大小寫。 |
 | `HAPI_API_URL` | hub URL（`hapiCompat` 為 `hub`／`auto` 時）。 |
 | `CLI_API_TOKEN` | HAPI CLI access token；**建議用這個而不是把 token 寫進 YAML**。 |
 | `HAPI_EXTRA_HEADERS_JSON` | JSON 物件，附加到每個 hub 請求。 |
 | `HAPI_SESSION_ID` | 由 `hapi dsh` 啟動時 HAPI 會 export；plugin 用它排除自己並提供回覆位址。 |
-| `HAPI_DISABLE_PEER_TOOLS` | HAPI 原生 kill switch；`1`／`true`／`yes` 時連同名相容工具都不註冊（跟 HAPI 行為一致）。 |
+| `HAPI_DISABLE_PEER_TOOLS` | HAPI 原生 kill switch；`1`／`true`／`yes` 時不註冊同名相容工具，忽略前後空白與大小寫（跟 HAPI 行為一致）。 |
 
 ## 憑證安全
 

@@ -8,10 +8,10 @@
 
 | 模式 | 別名接什麼 | 何時用 |
 | --- | --- | --- |
-| `auto`（預設） | 有 `hapiHub` 設定或 `HAPI_API_URL` + `CLI_API_TOKEN` 就 `hub`，否則 `local` | 一般情況。 |
+| `auto`（預設） | 有 `hapiHub` 區塊或 `HAPI_API_URL` + `CLI_API_TOKEN` 都非空白就 `hub`，否則 `local` | 一般情況；只有 token 或只有 URL 不會切換到 hub。 |
 | `local` | 本機 DSH session（跟 `session_*` 同一批目標） | 沒有 HAPI hub，但想沿用 HAPI 寫法。 |
 | `hub` | 真正的 HAPI hub REST API | DSH 要跟 HAPI 上的 session 對話。 |
-| `false` | 不註冊別名，只留原生 `session_*` | 不想讓模型看到兩套名字。 |
+| `false`／`none` | 不註冊別名，只留原生 `session_*` | 不想讓模型看到兩套名字。 |
 
 `HAPI_DISABLE_PEER_TOOLS=1|true|yes` 時也不註冊（跟 HAPI 自己的 kill switch 一致）。
 
@@ -26,9 +26,11 @@ hub mode 需要的設定：
       # accessToken: 建議改用 CLI_API_TOKEN
 ```
 
-完整欄位與環境變數見 [設定](configuration.md)。hub client 建立失敗（缺 token／URL）時會印 warning 並退回 `local` 別名，不會擋開機。
+完整欄位與環境變數見 [設定](configuration.md)。hub client 建立失敗（例如缺 token）時會印 warning：`auto` 退回 `local` 別名；明確設定 `hapiCompat: hub` 則停用 HAPI 同名工具，保留原生 `session_*` 工具，不會把 hub 目標默默改成本機 session。
 
 ## 工具語意
+
+`local` 模式的 `list_peers.active` 表示 session 已在記憶體中、可直接接收訊息；live session 即使 idle 也回 `true`，stored session 回 `false`。執行中／閒置的區別仍由原生 `session_list` 的 `status` 表示。
 
 `hub` 模式的行為對齊 HAPI：
 

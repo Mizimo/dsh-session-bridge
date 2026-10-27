@@ -52,19 +52,28 @@ export function normalizeSessionRef(raw) {
   return ids.length === 1 ? ids[0] : ''
 }
 
+/** True for a canonical DSH session id or bare UUID, with case-insensitive hex. */
+export function isFullSessionId(value) {
+  return typeof value === 'string' && /^(?:session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
 /**
  * Resolve a normalized reference against known session ids. The caller decides
  * how to report each outcome.
  *
  * @param ids - known session ids.
  * @param ref - bare id or unique id prefix.
+ * @param options - minimum prefix length, excluding a leading `session-`.
  * @returns `{ id }` on a unique match, `{ ambiguous: ids }` when a prefix has
- *   several matches, or `{ missing: true }` when nothing matches.
+ *   several matches, `{ tooShort: true }` below the prefix minimum, or
+ *   `{ missing: true }` when nothing matches.
  */
-export function matchSessionRef(ids, ref) {
+export function matchSessionRef(ids, ref, { minPrefixChars = 0 } = {}) {
   const normalized = typeof ref === 'string' ? ref.trim() : ''
-  if (normalized === '') return { missing: true }
   if (ids.includes(normalized)) return { id: normalized }
+  const variable = normalized.startsWith('session-') ? normalized.slice('session-'.length) : normalized
+  if (variable.length < minPrefixChars) return { tooShort: true }
+  if (normalized === '') return { missing: true }
   const matches = ids.filter((id) => id.startsWith(normalized))
   if (matches.length === 1) return { id: matches[0] }
   if (matches.length > 1) return { ambiguous: matches }

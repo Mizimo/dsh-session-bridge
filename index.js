@@ -31,8 +31,9 @@
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { compatibilityOf, disabledByEnv, messageBudgetOf } from './config.js'
 import { createHapiHubClient, HapiHubError } from './hapi-hub.js'
-import { normalizeSessionRef } from './refs.js'
+import { isFullSessionId, matchSessionRef, normalizeSessionRef } from './refs.js'
 
 /** Cordis plugin name. */
 export const name = 'session-bridge'
@@ -43,9 +44,6 @@ export const inject = ['agents', 'tools', 'systemPrompt']
 /** Prefix that marks a bridge-delivered message in the target model's view. */
 const MARKER = '[session-bridge]'
 
-/** Default cap for one message body, matching DSH's own agent-message budget. */
-const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024
-
 /** How many stored (not running) sessions session_list surfaces as wakeable targets. */
 const STORED_SESSION_LIMIT = 30
 
@@ -54,9 +52,6 @@ const INSPECT_DEFAULT_MESSAGE_LIMIT = 8
 const INSPECT_MAX_MESSAGE_LIMIT = 30
 const INSPECT_MESSAGE_CHARS = 600
 const INSPECT_MAX_BYTES = 16 * 1024
-
-/** Env kill switch, mirroring HAPI's `HAPI_DISABLE_PEER_TOOLS`. */
-const DISABLE_ENV = 'DSH_SESSION_BRIDGE_DISABLE'
 
 /**
  * Guidance installed into every session agent that may use the bridge.
@@ -112,57 +107,6 @@ function jsonOutput(schema) {
 /** UTF-8 byte length of one string. */
 function byteLength(text) {
   return Buffer.byteLength(text, 'utf8')
-}
-
-/** Normalize a positive byte budget from row config. */
-function messageBudgetOf(config) {
-  const configured = config?.maxMessageBytes
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_MESSAGE_BYTES
-}
-
-/** True when the environment kill switch is on. */
-function disabledByEnv() {
-  try {
-    const raw = process.env?.[DISABLE_ENV]
-    return raw === '1' || raw === 'true'
-  } catch {
-    return false
-  }
-}
-
-/** HAPI's own peer-tool kill switch; when set, HAPI would not expose peers. */
-const HAPI_PEER_DISABLE_ENV = 'HAPI_DISABLE_PEER_TOOLS'
-function hapiPeerToolsDisabledByEnv() {
-  try {
-    const raw = process.env?.[HAPI_PEER_DISABLE_ENV]
-    // Same truthiness as HAPI 0.31.2 (peerTools.ts): only true/1/yes count.
-    return typeof raw === 'string' && ['1', 'true', 'yes'].includes(raw.trim().toLowerCase())
-  } catch {
-    return false
-  }
-}
-
-/**
- * Resolve the optional HAPI compatibility surface:
- * `local` aliases or real hub tools. `auto` picks hub when credentials exist.
- */
-function compatibilityOf(config) {
-  // HAPI disables its peer tools when HAPI_DISABLE_PEER_TOOLS is set; a DSH
-  // session spawned by such a HAPI should not expose the HAPI-named aliases.
-  if (hapiPeerToolsDisabledByEnv()) return null
-  const hub = config?.hapiHub
-  const configuredHub = hub !== null && typeof hub === 'object'
-  // Credentials may also come from the HAPI environment, so `hub` mode needs
-  // only an explicit hapiHub block (or the env pair) here; the client validates
-  // the final apiUrl/accessToken and the plugin falls back to local aliases.
-  // HAPI never mirrors CLI_API_TOKEN into wrapped agents, but when a user
-  // does export it the default hub URL applies, so a token alone is enough.
-  const envHub = typeof process.env?.CLI_API_TOKEN === 'string' && process.env.CLI_API_TOKEN.trim() !== ''
-  const requested = config?.hapiCompat
-  if (requested === false || requested === 'none') return null
-  if (requested === 'hub') return configuredHub || envHub ? { mode: 'hub', hub: hub ?? {} } : null
-  if (requested === 'local') return { mode: 'local' }
-  return configuredHub || envHub ? { mode: 'hub', hub: hub ?? {} } : { mode: 'local' }
 }
 
 /** Read one session's folded title without failing the caller. */
@@ -248,28 +192,36 @@ async function listStoredPeers(ctx, caller, signal) {
 
 // ── Session references: ids, unique prefixes, /sessions/<id> citations ─────
 
-/** Known session ids this deployment can resolve, live first. */
+/** Known ordinary sessions, live first, and whether stored discovery succeeded. */
 async function sessionRefCandidates(ctx, caller, options = {}) {
   const candidates = new Map()
+  let exhaustive = false
   for (const agent of ctx.agents.roots()) {
-    if (agent.session.header.origin === 'subagent') continue
-    candidates.set(agent.id, { id: agent.id, live: true })
+    const header = agent.session.header
+    if (header.origin === 'subagent') continue
+    candidates.set(agent.id, { id: agent.id, live: true, cwd: header.cwd, origin: header.origin })
   }
   const controller = ctx.get('sessionController')
   if (typeof controller?.list === 'function') {
     try {
       const all = await controller.list({}, options.signal)
       if (Array.isArray(all)) {
+        if (options.allPersisted !== true) exhaustive = true
         for (const entry of all) {
           if (typeof entry?.sessionId !== 'string') continue
           if (entry.origin === 'subagent') continue
-          if (!candidates.has(entry.sessionId)) {
-            candidates.set(entry.sessionId, { id: entry.sessionId, live: entry.agentAvailable === true })
-          }
+          const existing = candidates.get(entry.sessionId)
+          candidates.set(entry.sessionId, {
+            id: entry.sessionId,
+            live: existing?.live === true || entry.agentAvailable === true,
+            cwd: existing?.cwd ?? entry.cwd,
+            persisted: entry.persisted,
+            origin: existing?.origin ?? entry.origin,
+          })
         }
       }
     } catch {
-      // A broken controller listing only narrows discovery; resolution below still works.
+      // Without a complete listing, only canonical full ids may pass through.
     }
   }
   if (options.allPersisted === true) {
@@ -277,53 +229,73 @@ async function sessionRefCandidates(ctx, caller, options = {}) {
     if (typeof query?.listSessions === 'function') {
       try {
         const records = await query.listSessions(options.signal)
-        for (const record of records ?? []) {
-          const id = record?.header?.id
-          if (typeof id === 'string' && !candidates.has(id)) {
-            candidates.set(id, { id, live: record.live === true })
+        if (Array.isArray(records)) {
+          exhaustive = true
+          for (const record of records) {
+            const header = record?.header
+            const id = header?.id
+            if (typeof id !== 'string' || header.origin === 'subagent') continue
+            const existing = candidates.get(id)
+            candidates.set(id, {
+              id,
+              live: existing?.live === true || record.live === true,
+              cwd: existing?.cwd ?? header.cwd,
+              persisted: record.persisted ?? existing?.persisted,
+              origin: existing?.origin ?? header.origin,
+            })
           }
         }
       } catch {
-        // Same as above: an unreadable corpus must not mask an exact id.
+        // Live roots and controller rows do not exhaust the persisted corpus.
       }
     }
   }
   if (options.excludeCaller === true && caller !== undefined) candidates.delete(caller.id)
-  return [...candidates.values()]
+  return { candidates: [...candidates.values()], exhaustive }
 }
 
 /**
- * Resolve one user/model supplied session reference to a full session id.
- * Exact ids win; a unique prefix is accepted; ambiguous prefixes fail with a
- * sample of matches. When nothing matches the reference passes through so the
- * caller can report the precise reachability error.
+ * Resolve a reference and retain its discovery metadata. Exact ids win; local
+ * prefixes need eight variable characters. A missing canonical id may pass
+ * through only when the deployment could not enumerate the relevant corpus.
  */
-async function resolveSessionRef(ctx, caller, rawRef, options = {}) {
+async function resolveSessionRefInfo(ctx, caller, rawRef, options = {}) {
   const normalized = normalizeSessionRef(rawRef)
   if (normalized === '') {
     throw new Error('target must be a session id, a unique id prefix, or a string containing one /sessions/<id> citation')
   }
-  const candidates = await sessionRefCandidates(ctx, caller, options)
-  /** Unique match for one reference form, or the raw candidate list. */
-  const resolveForm = (form) => {
-    if (candidates.some((candidate) => candidate.id === form)) return { id: form }
-    const found = candidates.filter((candidate) => candidate.id.startsWith(form))
-    if (found.length === 1) return { id: found[0].id }
-    if (found.length > 1) return { ambiguous: found }
-    return undefined
-  }
-  let resolved = resolveForm(normalized)
+  const { candidates, exhaustive } = await sessionRefCandidates(ctx, caller, options)
+  const ids = candidates.map((candidate) => candidate.id)
+  const forms = normalized.startsWith('session-') ? [normalized] : [normalized, `session-${normalized}`]
+  const exactId = forms.find((form) => ids.includes(form))
+  if (exactId !== undefined) return { id: exactId, candidate: candidates.find((candidate) => candidate.id === exactId) }
+  let resolved = matchSessionRef(ids, normalized, { minPrefixChars: 8 })
   // GUI/API surfaces often show the bare uuid while DSH session ids carry the
   // `session-` scheme; accept that form too when the full id form misses.
-  if (resolved === undefined && !normalized.startsWith('session-')) resolved = resolveForm(`session-${normalized}`)
-  if (resolved === undefined) return normalized
+  if ((resolved.missing || resolved.tooShort) && forms.length > 1) {
+    resolved = matchSessionRef(ids, forms[1], { minPrefixChars: 8 })
+  }
+  if (resolved.tooShort) {
+    throw new Error(`session reference "${normalized}" is too short; use at least 8 characters of the variable id part (excluding session-) or call session_list`)
+  }
   if (resolved.ambiguous !== undefined) {
-    const sample = resolved.ambiguous.slice(0, 5).map((match) => match.id.slice(0, 'session-'.length + 8)).join(', ')
+    const sample = resolved.ambiguous.slice(0, 5).map((id) => id.slice(0, 'session-'.length + 8)).join(', ')
     throw new Error(
       `session reference "${normalized}" is ambiguous: it matches ${resolved.ambiguous.length} sessions (${sample}${resolved.ambiguous.length > 5 ? ', ...' : ''}); use a longer prefix`,
     )
   }
-  return resolved.id
+  if (resolved.id !== undefined) {
+    return { id: resolved.id, candidate: candidates.find((candidate) => candidate.id === resolved.id) }
+  }
+  if (!exhaustive && isFullSessionId(normalized)) {
+    return { id: `session-${normalized.replace(/^session-/i, '')}`, candidate: undefined }
+  }
+  throw new Error(`no session matching "${normalized}" on this host; call session_list${exhaustive ? '' : ' or use a canonical full session id when enumeration is unavailable'}`)
+}
+
+/** Resolve a reference when the caller needs only the session id. */
+async function resolveSessionRef(ctx, caller, rawRef, options = {}) {
+  return (await resolveSessionRefInfo(ctx, caller, rawRef, options)).id
 }
 
 // ── Presence: "which sessions can I talk to, and who are they" ──────────────
@@ -336,7 +308,7 @@ async function peerRows(ctx, caller, limit, signal) {
     const info = describeSession(ctx, agent)
     rows.set(info.id, {
       id: info.id,
-      active: info.status === 'running',
+      active: true,
       status: info.status,
       flavor: 'dsh',
       name: info.title ?? info.cwd ?? info.id.slice(0, 8),
@@ -413,7 +385,11 @@ function inspectMessages(events, limit) {
       text: clipped,
     }
     if (typeof event.time === 'number') entry.time = event.time
-    if (event.type === 'user/message' && event.data?.source?.kind === 'agent-message') entry.fromAgent = true
+    if (event.type === 'user/message' && event.data?.source?.kind === 'agent-message') {
+      entry.fromAgent = true
+      const senderSessionId = event.data.source.senderSessionId
+      if (typeof senderSessionId === 'string' && senderSessionId.trim() !== '') entry.senderSessionId = senderSessionId
+    }
     messages.push(entry)
     bytes += Buffer.byteLength(clipped, 'utf8')
   }
@@ -437,7 +413,10 @@ async function inspectSession(ctx, sessionId, messageLimit) {
   } catch (error) {
     throw new Error(`cannot read session "${sessionId}": ${error instanceof Error ? error.message : String(error)}`)
   }
-  const header = loaded?.session ?? {}
+  const header = loaded?.session?.header ?? loaded?.session ?? {}
+  if (header.origin === 'subagent' || (liveAgent !== undefined && !isOrdinarySessionRoot(ctx, liveAgent))) {
+    throw new Error(`cannot inspect session "${sessionId}": session is owned by subagent or teammate routing`)
+  }
   const events = Array.isArray(loaded?.events) ? loaded.events : []
   let title
   for (let index = events.length - 1; index >= 0; index--) {
@@ -496,7 +475,12 @@ async function resumeSetup(ctx, observation, selection) {
  */
 async function resolveTargetAgent(ctx, sessionId) {
   const live = ctx.agents.get(sessionId)
-  if (live !== undefined) return { agent: live, cold: false }
+  if (live !== undefined) {
+    if (!isOrdinarySessionRoot(ctx, live)) {
+      return { agent: undefined, cold: false, reason: 'session is owned by subagent or teammate routing' }
+    }
+    return { agent: live, cold: false }
+  }
   const controller = ctx.get('sessionController')
   if (typeof controller?.resolveAgent === 'function') {
     // The web Session Controller owns ordinary-session resume policy (preset,
@@ -561,6 +545,7 @@ async function resolveTargetAgent(ctx, sessionId) {
 
 /** Deliver one already-composed message body into a peer session. */
 async function deliver(ctx, caller, targetRef, bodyText, budget, kind) {
+  if (normalizeSessionRef(targetRef) === caller.id) throw new Error('session_send cannot target the calling session itself')
   const targetId = await resolveSessionRef(ctx, caller, targetRef, { excludeCaller: true })
   if (targetId === caller.id) throw new Error('session_send cannot target the calling session itself')
   if (byteLength(bodyText) > budget) {
@@ -668,6 +653,7 @@ const inspectOutput = jsonOutput({
           time: { type: 'number' },
           text: { type: 'string', required: true },
           fromAgent: { type: 'boolean' },
+          senderSessionId: { type: 'string' },
         },
       },
     },
@@ -1093,7 +1079,7 @@ export function apply(ctx, config = {}) {
     return
   }
   const budget = messageBudgetOf(config)
-  const compat = compatibilityOf(config)
+  let compat = compatibilityOf(config)
   let hubClient
   if (compat?.mode === 'hub') {
     try {
@@ -1101,8 +1087,11 @@ export function apply(ctx, config = {}) {
       compat.hubUrl = hubClient.apiUrl
       if (hubClient.selfSessionId !== undefined) compat.selfSessionId = hubClient.selfSessionId
     } catch (error) {
-      ctx.logger?.warn?.(`session-bridge: HAPI hub client unavailable (${error instanceof Error ? error.message : String(error)}); falling back to HAPI-compatible local aliases`)
-      compat.mode = 'local'
+      const fallback = compat.explicit === true
+        ? 'HAPI-compatible aliases disabled; native session_* tools remain available'
+        : 'falling back to HAPI-compatible local aliases'
+      ctx.logger?.warn?.(`session-bridge: HAPI hub client unavailable (${error instanceof Error ? error.message : String(error)}); ${fallback}`)
+      compat = compat.explicit === true ? null : { mode: 'local' }
     }
   }
   const options = { budget, compat, hubClient }

@@ -7,6 +7,7 @@
 | 檔案 | 職責 |
 | --- | --- |
 | `index.js` | plugin 入口：`apply()`、session 列舉／讀取／送達、四個原生工具、HAPI 別名工具、system prompt policy。 |
+| `config.js` | 不依賴 DSH 的 row config／環境變數解析、訊息預算與 HAPI 模式選擇。 |
 | `hapi-hub.js` | HAPI hub REST client（`createHapiHubClient` / `HapiHubError`），處理 auth、list、inspect、resume、send 與錯誤分型。 |
 | `refs.js` | session reference 解析：citation 抽取、id／前綴匹配、ambiguous 判斷。 |
 | `cordis.patch.yml` | bundle 的 patch 層：插入 `session-bridge` row（optional）。 |
@@ -61,12 +62,13 @@ await ctx.get('sessions')?.flush?.(target.session)
 ## Reference 解析
 
 - `normalizeSessionRef()`：先 trim；若字串含 `/sessions/`，抽出其中 id；抽出多個不同 id 時回空字串（fail closed），只有一個才使用。
-- `matchSessionRef()`：完整 id 優先，其次唯一前綴；多個匹配回 `ambiguous`，沒有匹配回 `missing`。
+- `matchSessionRef()`：完整 id 優先，其次唯一前綴；多個匹配回 `ambiguous`，沒有匹配回 `missing`。本機解析設定至少 8 碼的可變 id 部分，過短回 `tooShort`。
 - DSH id 是 `session-<uuid>`，所以額外接受「只給 uuid 前綴」的形式（補上 `session-` 再比對），GUI／API 常見的裸 uuid 也能用。
+- `resolveSessionRefInfo()` 保留候選 metadata 與解析出的 id；只有相關列舉服務不可用時，才允許 `isFullSessionId()` 驗證過的完整 id 繼續交給 host。完整列舉後找不到目標就直接報錯。
 
 ## HAPI hub client
 
-- 建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`，由 plugin 退回 local 別名。
+- 建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`。`auto` 模式退回 local 別名；明確指定 hub 模式則停用 HAPI 別名，保留原生工具。
 - `POST /api/auth` 換 JWT，single-flight 快取；任何請求遇到 401 會重認證一次再重試。
 - 每次呼叫有 timeout（一般 20s、auth 10s、resume／send 30s）；`TimeoutError` 對應 `timeout`、呼叫端取消對應 `disabled`。
 - `inspect_peer` 先用 list 解析前綴，再 `GET /:id` 取最新 metadata，最後讀 messages——不 resume。

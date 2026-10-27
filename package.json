@@ -13,6 +13,7 @@
   },
   "files": [
     "index.js",
+    "config.js",
     "hapi-hub.js",
     "refs.js",
     "cordis.patch.yml",
