@@ -8,12 +8,26 @@
 npm test
 ```
 
-`node --test`，零依賴（Node 20+），CI 在 Node 20／22／24 上跑。涵蓋：
+`npm test` 執行 `node --import ./test-support/register.mjs --test`，不需要安裝 DSH 或其他測試依賴（Node 20+）。CI 設定在 Node 20／22／24 上跑。涵蓋：
 
-- `test/refs.test.mjs`：citation 抽取、dotted lookalike fail-closed、完整 id／前綴／ambiguous／missing 匹配。
-- `test/hapi-hub.test.mjs`：對 mock hub 驗證 auth（含 401 重認證一次）、list 排序與排除自己、inspect（前綴解析、message 正規化、ambiguous／not_found）、ping（resume／active／409 retry／self guard／byte 限制）。
+- `test/index.test.mjs`：透過真正的 `apply()` 與註冊後的工具驗證生命週期／卸載、kill switch、live／stored 列表與並行標題讀取、reference fail-closed、inspect provenance／截斷／redaction、signal 傳遞、送達與 handoff 封裝、UTF-8 訊息 byte 限制、loop guard（含 flush 失敗）、fallback 冷啟動去重與重試、controller 路徑，以及 local／hub 別名與 fail-closed 設定。原生 `session_list` 驗證 `status`，local `list_peers` 驗證 idle live session 仍為 `active: true`。
+- `test/refs.test.mjs`：citation 抽取、dotted lookalike fail-closed、完整 id／前綴／ambiguous／missing 匹配、最短前綴與 canonical UUID 驗證。
+- `test/hapi-hub.test.mjs`：對 mock hub 驗證 auth（含 401 重認證一次）、list 排序與排除自己、inspect（前綴解析、message 正規化與截斷、ambiguous／not_found）、ping（resume／active／多代 Pi readiness／409 retry／self guard），以及取消、timeout 與 HTTP／連線錯誤分類。訊息 byte 限制由 `index.js` 的工具執行，對應測試在 `test/index.test.mjs`。
+- `test/config.test.mjs`：環境旗標、訊息預算、auto／local／hub 模式與 kill switch。
+- `test/policy.test.mjs`：scope／allowCwds、訊息封裝與本文轉義、每對 session 的 loop guard 與時間窗。
 
-HAPI hub client 用注入的 `fetch` 打 mock，不需要真 hub。plugin 本体（`index.js`）依賴 DSH host 服務，由 E2E 覆蓋。
+測試支援檔案放在 `test-support/`，不放在 `test/`，避免 Node 把支援用的 `.js`／`.mjs` 當作測試檔案；也不加入套件發佈的 `files` allowlist。
+
+| 檔案 | 用途 |
+| --- | --- |
+| `test-support/register.mjs` | 用 `node:module` 的 `register()` 安裝 loader；`--import` 也會套用到 test runner 的子程序。 |
+| `test-support/loader.mjs` | 只攔截三個完整的 `@deepseek-ai/dsh-agent`／`dsh-llm`／`dsh-tools` specifier，其他 import 交給 Node 正常解析。 |
+| `test-support/stubs/dsh-agent.mjs` | 提供空的 `installModelSelection()`。 |
+| `test-support/stubs/dsh-llm.mjs` | `createUserMessage()` 原樣回傳輸入，讓測試檢查 content 與 structured source。 |
+| `test-support/stubs/dsh-tools.mjs` | `defineTool()` 原樣回傳定義，測試直接執行註冊的 `execute()`。 |
+| `test-support/helpers.mjs` | fake host／agent、scoped registry 與 disposer、session query／controller／flush 等服務、呼叫與 signal 紀錄，以及控制並行順序的 Promise。 |
+
+`index.js` 不需要為測試增加內部 exports。單元測試驗證插件接線與行為；真實 DSH driver、模型與落盤流程仍由 E2E 驗證。測試不連線到真 hub：`test/hapi-hub.test.mjs` 覆寫並恢復 `globalThis.fetch`；index 的 hub 測試也使用 fetch mock。環境變數與 mock 在測試結束後恢復。
 
 ## E2E
 
