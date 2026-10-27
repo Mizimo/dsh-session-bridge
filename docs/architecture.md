@@ -8,6 +8,7 @@
 | --- | --- |
 | `index.js` | plugin 入口：`apply()`、session 列舉／讀取／送達、四個原生工具、HAPI 別名工具、system prompt policy。 |
 | `config.js` | 不依賴 DSH 的 row config／環境變數解析、訊息預算與 HAPI 模式選擇。 |
+| `policy.js` | 不依賴 DSH 的 workspace 範圍判斷、peer 訊息封裝與每對 session 的 loop guard。 |
 | `hapi-hub.js` | HAPI hub REST client（`createHapiHubClient` / `HapiHubError`），處理 auth、list、inspect、resume、send 與錯誤分型。 |
 | `refs.js` | session reference 解析：citation 抽取、id／前綴匹配、ambiguous 判斷。 |
 | `cordis.patch.yml` | bundle 的 patch 層：插入 `session-bridge` row（optional）。 |
@@ -30,21 +31,33 @@
 ## 送達
 
 ```js
+loopGuard.check(caller.id, targetId)
 const message = createUserMessage({
-  content: [textBlock(header), textBlock(body)],
+  content: [textBlock(peerMessageText({
+    kind,
+    senderId: caller.id,
+    senderTitle: sender.title,
+    senderCwd: sender.cwd,
+    body,
+  }))],
   source: { kind: 'agent-message', form: 'relay', senderSessionId: caller.id },
 })
 target.steer(message)
 await ctx.get('sessions')?.flush?.(target.session)
+loopGuard.note(caller.id, targetId)
 ```
 
+- `apply()` 建立共用的 scope 與 loop guard，傳入各 agent 的工具。`deliver()` 以解析候選的 cwd 檢查範圍，並檢查配對次數；這兩步都在取得／resume 目標 agent 之前，未知 workspace 在非 `host` 模式下直接拒絕。
+- `peerMessageText()` 把 bridge header、workspace 與 notice 放在標籤上方，peer 本文放在 `<peer-message>` 內；本文中的封裝標籤與 `[session-bridge]` 會轉義，不能冒充 bridge header。hub 同樣使用這個封裝，額外 header 提供自動訊息來源與回覆位址。
 - 跟 DSH 內建 Agent Teams 同一條 durable 通道；`steer` 在 idle 時會啟動新 turn，running 時在下一個 step 邊界插入。
 - `flush` 只保證「已提交的 session events」落盤，用來讓 sender 在回報成功前盡量收斂；剛進 inbox 的訊息要等 target driver 取用才進 log。
+- 本機在 steer／flush 成功後記錄配對時間，hub 則在送出成功後記錄。local 以完整目標 id 計數，hub 以正規化的目標參照字串計數；檢查時清除超過時間窗的紀錄。
 - 目標不在記憶體時先 resume（見下），成功後回 `coldResumed: true`。
 
 ## 讀取
 
 - `sessionQuery.readSession(id)` 對 log 做完整 replay，**不會**把 session 變成 live。
+- 以載入 header 的 cwd（缺少時使用解析候選的 cwd）檢查 scope；超出範圍時只回正常 metadata、空 messages、`truncated: false` 與 `redacted: true`，不抽取對話文字。
 - 逐 event 抽 `user/message` → `data.content`、`assistant/message` → `data.message.content`、`session/title` → `data.title`；tool call 只留名稱。
 - `user/message` 的來源在 `data.source`；`kind = 'agent-message'` 的訊息標 `fromAgent: true` 並保留 `senderSessionId` 供工具回傳。
 - 單則 600 字、總量 16 KiB、預設 8 則（上限 30）；截斷時 `truncated: true`。
@@ -77,7 +90,9 @@ await ctx.get('sessions')?.flush?.(target.session)
 
 ## 設計取捨與失敗窗口
 
-- **沒有廣播、沒有 hop 上限**：一次一個目標；單則大小有上限，但 ping-pong 次數沒有。請在 prompt 裡要求「回報一次即可」。
+- **預設 same-cwd**：本機對話內容與送達限制在相同工作目錄；可用 `allowCwds` 放行指定目標及子目錄，或選擇 `same-root`／`host`。遠端 hub 不套用本機 cwd 範圍。
+- **header 與本文分界**：bridge 撰寫的來源說明放在標籤外，peer 本文轉義並明示不可信；封裝不會把 peer 指令變成人類授權。
+- **每對 loop guard**：一次一個目標，預設每組 sender → target 在 60 秒內最多 10 則；各工具共用記憶體計數，可配置或關閉，重啟後歸零。
 - **flush 不是完整 durability**：steer 被接受後、target driver 取用前，process crash 仍有小窗口會丟訊息；要完全避免需要在 host 端改 delivery 語意。
 - **HAPI 單向**：DSH 不是 hub 上的 session，除非跑在 `hapi dsh` 底下，否則回覆只能用 `inspect_peer` 讀。
 - **prefer host 路徑**：冷啟動優先用 `sessionController.resolveAgent`，只有在 host 沒提供時才走可攜 fallback；兩條路徑都不會直接改 session 檔案。

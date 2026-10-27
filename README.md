@@ -29,6 +29,8 @@ Host-only bundle。沒有 client 半，沒有 build step。<br>
 
 `session_inspect` 對冷 session 也有效；`session_send` 會把它 resume 成 live agent（回傳 `coldResumed: true`）。收到的訊息在 session log 裡帶 `agent-message`／`relay` 來源，本文開頭也有 `[session-bridge]` 標記。
 
+預設範圍是 `same-cwd`：本機跨工作目錄協作需設定 `allowCwds` 或 `scope: host`，見 [設定](docs/configuration.md)。
+
 需要 HAPI 的 `list_peers`／`inspect_peer`／`ping_peer` 時，同一組名字可以接本機 DSH session，也可以接真正的 HAPI hub；模式和限制見 [HAPI 相容](docs/hapi.md)。
 
 ## 安裝

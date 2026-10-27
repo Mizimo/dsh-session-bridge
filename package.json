@@ -14,6 +14,7 @@
   "files": [
     "index.js",
     "config.js",
+    "policy.js",
     "hapi-hub.js",
     "refs.js",
     "cordis.patch.yml",

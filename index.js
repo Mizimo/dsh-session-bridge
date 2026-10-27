@@ -33,6 +33,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { compatibilityOf, disabledByEnv, messageBudgetOf } from './config.js'
 import { createHapiHubClient, HapiHubError } from './hapi-hub.js'
+import { createLoopGuard, cwdAllowed, normalizeScope, peerMessageText } from './policy.js'
 import { isFullSessionId, matchSessionRef, normalizeSessionRef } from './refs.js'
 
 /** Cordis plugin name. */
@@ -40,9 +41,6 @@ export const name = 'session-bridge'
 
 /** Services required by the plugin; optional capabilities are read with ctx.get(). */
 export const inject = ['agents', 'tools', 'systemPrompt']
-
-/** Prefix that marks a bridge-delivered message in the target model's view. */
-const MARKER = '[session-bridge]'
 
 /** How many stored (not running) sessions session_list surfaces as wakeable targets. */
 const STORED_SESSION_LIMIT = 30
@@ -401,7 +399,7 @@ function inspectMessages(events, limit) {
  * Read one session's metadata and recent message text from the host session
  * corpus. Read-only: it never resumes, wakes, or mutates the target.
  */
-async function inspectSession(ctx, sessionId, messageLimit) {
+async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, candidate } = {}) {
   const query = ctx.get('sessionQuery')
   if (typeof query?.readSession !== 'function') {
     throw new Error('session_inspect requires the host session-query service, which this deployment does not compose')
@@ -433,14 +431,18 @@ async function inspectSession(ctx, sessionId, messageLimit) {
   } catch {
     // Status hints are optional; the log read above already succeeded.
   }
-  const { messages, truncated } = inspectMessages(events, messageLimit)
+  const targetCwd = typeof header.cwd === 'string' && header.cwd.trim() !== '' ? header.cwd : candidate?.cwd
   const lastEvent = events.at(-1)
   const session = { id: sessionId, live: liveAgent !== undefined, persisted }
   if (title !== undefined) session.title = title
-  if (typeof header.cwd === 'string') session.cwd = header.cwd
+  if (typeof targetCwd === 'string') session.cwd = targetCwd
   if (liveAgent !== undefined && typeof liveAgent.status === 'string') session.status = liveAgent.status
   if (typeof header.createdAt === 'number') session.createdAt = header.createdAt
   if (typeof lastEvent?.time === 'number') session.updatedAt = lastEvent.time
+  if (!cwdAllowed(scope, callerCwd, targetCwd)) {
+    return { session, messages: [], truncated: false, redacted: true }
+  }
+  const { messages, truncated } = inspectMessages(events, messageLimit)
   return { session, messages, truncated }
 }
 
@@ -544,13 +546,25 @@ async function resolveTargetAgent(ctx, sessionId) {
 }
 
 /** Deliver one already-composed message body into a peer session. */
-async function deliver(ctx, caller, targetRef, bodyText, budget, kind) {
+async function deliver(ctx, caller, targetRef, bodyText, options, kind, signal) {
+  const { budget, scope, loopGuard } = options
+  signal?.throwIfAborted()
   if (normalizeSessionRef(targetRef) === caller.id) throw new Error('session_send cannot target the calling session itself')
-  const targetId = await resolveSessionRef(ctx, caller, targetRef, { excludeCaller: true })
+  const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, caller, targetRef, { excludeCaller: true, signal })
   if (targetId === caller.id) throw new Error('session_send cannot target the calling session itself')
   if (byteLength(bodyText) > budget) {
     throw new Error(`message exceeds the ${budget}-byte budget; shorten it or split the work`)
   }
+  const callerCwd = caller.session.header.cwd
+  const targetCwd = candidate?.cwd
+  if (!cwdAllowed(scope, callerCwd, targetCwd)) {
+    const reason = typeof targetCwd !== 'string' || targetCwd.trim() === ''
+      ? 'cannot verify the target workspace'
+      : 'target workspace is outside the allowed scope or the caller workspace cannot be verified'
+    throw new Error(`cannot send to session "${targetId}": ${reason} (scope: ${scope.mode}, caller workspace: ${JSON.stringify(callerCwd ?? 'unknown')}, target workspace: ${JSON.stringify(targetCwd ?? 'unknown')}); configure allowCwds for a known target workspace or scope: 'host'`)
+  }
+  signal?.throwIfAborted()
+  loopGuard.check(caller.id, targetId)
   const resolved = await resolveTargetAgent(ctx, targetId)
   if (resolved.agent === undefined) {
     throw new Error(`cannot reach session "${targetId}": ${resolved.reason}. Call session_list to see the sessions that are live.`)
@@ -558,14 +572,18 @@ async function deliver(ctx, caller, targetRef, bodyText, budget, kind) {
   const target = resolved.agent
   const sender = describeSession(ctx, caller)
   const targetInfo = describeSession(ctx, target)
-  const header = `${MARKER} ${kind === 'handoff' ? 'Handoff' : 'Message'} from DSH session ${JSON.stringify(sender.id)}`
-    + `${sender.title === undefined ? '' : ` (${JSON.stringify(sender.title)})`}`
-    + `${sender.cwd === undefined ? '' : `\nSender workspace: ${sender.cwd}`}`
-  const content = [textBlock(header), textBlock(bodyText)]
+  const content = [textBlock(peerMessageText({
+    kind,
+    senderId: sender.id,
+    senderTitle: sender.title,
+    senderCwd: sender.cwd,
+    body: bodyText,
+  }))]
   const message = createUserMessage({
     content,
     source: { kind: 'agent-message', form: 'relay', senderSessionId: caller.id },
   })
+  signal?.throwIfAborted()
   target.steer(message)
   try {
     // Flush the target's committed session events before the sender reports
@@ -573,6 +591,7 @@ async function deliver(ctx, caller, targetRef, bodyText, budget, kind) {
     // takes it from the inbox; a crash in between can still lose the queued
     // message, so this narrows rather than fully closes that window.
     await ctx.get('sessions')?.flush?.(target.session)
+    loopGuard.note(caller.id, targetId)
   } catch {
     // A flush failure must not turn an accepted steer into a reported error.
   }
@@ -658,11 +677,13 @@ const inspectOutput = jsonOutput({
       },
     },
     truncated: { type: 'boolean', required: true },
+    redacted: { type: 'boolean' },
   },
 })
 
 /** Local bridge tools (our canonical interface). */
-function localToolDefinitions(ctx, agent, budget) {
+function localToolDefinitions(ctx, agent, options) {
+  const { scope } = options
   return [
     defineTool({
       name: 'session_list',
@@ -740,10 +761,10 @@ function localToolDefinitions(ctx, agent, budget) {
         },
       },
       output: inspectOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
-        const targetId = await resolveSessionRef(ctx, agent, args.target, { allPersisted: true })
-        return await inspectSession(ctx, targetId, limit)
+        const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.target, { allPersisted: true, signal: exec?.signal })
+        return await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate })
       },
     }),
     defineTool({
@@ -766,10 +787,10 @@ function localToolDefinitions(ctx, agent, budget) {
         additionalProperties: false,
         properties: targetResultProperties,
       }),
-      async execute(args) {
+      async execute(args, exec) {
         const body = args.message
         if (typeof body !== 'string' || body.trim() === '') throw new Error('message must be non-empty text')
-        return await deliver(ctx, agent, args.target, body, budget, 'message')
+        return await deliver(ctx, agent, args.target, body, options, 'message', exec?.signal)
       },
     }),
     defineTool({
@@ -801,11 +822,11 @@ function localToolDefinitions(ctx, agent, budget) {
         additionalProperties: false,
         properties: targetResultProperties,
       }),
-      async execute(args) {
+      async execute(args, exec) {
         if (typeof args.summary !== 'string' || args.summary.trim() === '') throw new Error('summary must be non-empty text')
         if (typeof args.task !== 'string' || args.task.trim() === '') throw new Error('task must be non-empty text')
         const body = handoffBody({ summary: args.summary, task: args.task, reply: args.reply, senderId: agent.id })
-        return await deliver(ctx, agent, args.target, body, budget, 'handoff')
+        return await deliver(ctx, agent, args.target, body, options, 'handoff', exec?.signal)
       },
     }),
   ]
@@ -861,6 +882,7 @@ const hapiInspectOutput = jsonOutput({
       },
     },
     truncated: { type: 'boolean', required: true },
+    redacted: { type: 'boolean' },
   },
 })
 
@@ -883,7 +905,8 @@ const hapiPrefixParameter = {
 }
 
 /** HAPI-compatible tools backed by this host's own DSH sessions. */
-function localCompatToolDefinitions(ctx, agent, budget) {
+function localCompatToolDefinitions(ctx, agent, options) {
+  const { scope } = options
   return [
     defineTool({
       name: 'list_peers',
@@ -917,8 +940,8 @@ function localCompatToolDefinitions(ctx, agent, budget) {
       output: hapiInspectOutput,
       async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
-        const targetId = await resolveSessionRef(ctx, agent, args.sessionIdPrefix, { allPersisted: true, signal: exec?.signal })
-        const inspected = await inspectSession(ctx, targetId, limit)
+        const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.sessionIdPrefix, { allPersisted: true, signal: exec?.signal })
+        const inspected = await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate })
         const session = inspected.session
         return {
           sessionId: session.id,
@@ -931,6 +954,7 @@ function localCompatToolDefinitions(ctx, agent, budget) {
           ...(session.updatedAt === undefined ? {} : { updatedAt: session.updatedAt }),
           messages: inspected.messages.map((message) => ({ role: message.role, text: message.text })),
           truncated: inspected.truncated,
+          ...(inspected.redacted === undefined ? {} : { redacted: inspected.redacted }),
         }
       },
     }),
@@ -942,10 +966,10 @@ function localCompatToolDefinitions(ctx, agent, budget) {
         message: { type: 'string', required: true, description: 'Message text to deliver to the target session.' },
       },
       output: hapiPingOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const body = args.message
         if (typeof body !== 'string' || body.trim() === '') throw new Error('message must be non-empty text')
-        const result = await deliver(ctx, agent, args.sessionIdPrefix, body, budget, 'message')
+        const result = await deliver(ctx, agent, args.sessionIdPrefix, body, options, 'message', exec?.signal)
         const targetId = result.target.id
         return {
           delivered: true,
@@ -959,7 +983,8 @@ function localCompatToolDefinitions(ctx, agent, budget) {
 }
 
 /** HAPI hub tools: same names, but addressed to a HAPI hub. */
-function hubToolDefinitions(ctx, agent, budget, client) {
+function hubToolDefinitions(ctx, agent, options) {
+  const { budget, hubClient: client, loopGuard } = options
   return [
     defineTool({
       name: 'list_peers',
@@ -1009,17 +1034,22 @@ function hubToolDefinitions(ctx, agent, budget, client) {
         const replyLine = client.selfSessionId === undefined
           ? 'The sending DSH session is not itself a HAPI session and cannot receive HAPI messages; leave any reply in this conversation and it will be read with inspect_peer.'
           : `To reply, use HAPI ping_peer with sessionIdPrefix ${client.selfSessionId} (this DSH session runs under HAPI as that session).`
-        const prefixed = `${MARKER} Agent message from DSH session ${JSON.stringify(sender.id)}`
-          + `${sender.title === undefined ? '' : ` (${JSON.stringify(sender.title)})`}`
-          + `${sender.cwd === undefined ? '' : `\nSender workspace: ${sender.cwd}`}`
-          + '\nThis is an automated agent-to-agent message, not a message from the human user. '
-          + replyLine
-          + `\n\n${body}`
+        const prefixed = peerMessageText({
+          kind: 'message',
+          senderId: sender.id,
+          senderTitle: sender.title,
+          senderCwd: sender.cwd,
+          body,
+          extraLines: [`This is an automated agent-to-agent message, not a message from the human user. ${replyLine}`],
+        })
+        const targetKey = normalizeSessionRef(args.sessionIdPrefix)
+        loopGuard.check(agent.id, targetKey)
         const result = await client.pingPeer({
           sessionIdPrefix: args.sessionIdPrefix,
           message: prefixed,
-          signal: exec.signal,
+          signal: exec?.signal,
         })
+        loopGuard.note(agent.id, targetKey)
         return {
           delivered: true,
           sessionId: result.sessionId,
@@ -1045,7 +1075,7 @@ function clampPeerLimit(value) {
 
 /** Register the bridge tools and prompt section in one exact agent scope. */
 function install(agent, ctx, options) {
-  const { budget, compat, hubClient } = options
+  const { compat, hubClient } = options
   const scoped = agent.ctx
   const disposers = []
   const register = (disposer) => { disposers.push(disposer) }
@@ -1055,13 +1085,13 @@ function install(agent, ctx, options) {
       order: 130,
       text: () => policyText(agent.id, compat),
     }))
-    for (const tool of localToolDefinitions(ctx, agent, budget)) register(scoped.tools.register(tool))
+    for (const tool of localToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     if (compat?.mode === 'local') {
-      for (const tool of localCompatToolDefinitions(ctx, agent, budget)) register(scoped.tools.register(tool))
+      for (const tool of localCompatToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     }
     if (compat?.mode === 'hub') {
       if (hubClient === undefined) throw new Error('HAPI hub compatibility was requested but the hub client is unavailable')
-      for (const tool of hubToolDefinitions(ctx, agent, budget, hubClient)) register(scoped.tools.register(tool))
+      for (const tool of hubToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     }
   } catch (error) {
     for (const dispose of disposers.reverse()) dispose()
@@ -1079,6 +1109,8 @@ export function apply(ctx, config = {}) {
     return
   }
   const budget = messageBudgetOf(config)
+  const scope = normalizeScope(config)
+  const loopGuard = createLoopGuard(config)
   let compat = compatibilityOf(config)
   let hubClient
   if (compat?.mode === 'hub') {
@@ -1094,7 +1126,7 @@ export function apply(ctx, config = {}) {
       compat = compat.explicit === true ? null : { mode: 'local' }
     }
   }
-  const options = { budget, compat, hubClient }
+  const options = { budget, compat, hubClient, scope, loopGuard }
   const installed = new Map()
   const maybeInstall = (agent) => {
     if (installed.has(agent) || !isOrdinarySessionRoot(ctx, agent)) return

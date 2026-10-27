@@ -11,6 +11,11 @@
   config:
     enabled: true
     maxMessageBytes: 65536
+    scope: same-cwd
+    allowCwds: []
+    loopGuard:
+      windowMs: 60000
+      maxMessages: 10
     hapiCompat: auto
     hapiHub:
       apiUrl: http://127.0.0.1:3006
@@ -21,10 +26,17 @@
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | `false` 時完全不註冊工具（含 system prompt 段）。 |
 | `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
+| `scope` | `same-cwd` \| `same-root` \| `host` | `same-cwd` | 本機對話讀取與送達範圍；`same-cwd` 要求相同工作目錄，`same-root` 另允許互為祖先／子目錄，`host` 允許同 host 的 ordinary sessions。無效值使用 `same-cwd`。 |
+| `allowCwds` | string[] | `[]` | 額外允許的目標工作目錄及其子目錄。展開開頭的 `~/`，再以 `path.resolve()` 轉為絕對路徑；相對路徑以 host process 的 cwd 為準，無效項目忽略。 |
+| `loopGuard` | `false` \| object | `{ windowMs: 60000, maxMessages: 10 }` | 每組有方向性的 sender → target，在滑動時間窗內最多送出的訊息數；`false` 關閉限制。 |
 | `hapiCompat` | `auto` \| `local` \| `hub` \| `false` \| `none` | `auto` | HAPI 同名工具要接到哪裡；見 [HAPI 相容](hapi.md)。 |
 | `hapiHub` | object | — | hub client 設定；存在這個區塊時，`auto` 會選擇 hub。欄位見下。 |
 
 `auto` 只有在存在 `hapiHub` 區塊，或 `HAPI_API_URL` 與 `CLI_API_TOKEN` 都非空白時才選擇 hub；單獨設定其中一個環境變數仍使用 local。hub client 建立失敗時，`auto` 會印 warning 並退回 local 別名；明確設定 `hapiCompat: hub` 則印 warning 並停用三個 HAPI 同名工具，保留原生 `session_*` 工具。
+
+本機範圍以正規化後的目錄路徑比較；`same-root` 不代表尋找 Git root，同層的兄弟目錄不會因此互通。`allowCwds` 只放行指定目標目錄及其子目錄，`/work/proj2` 不屬於 `/work/proj`。除了 `host` 模式，雙方都必須有可驗證的 cwd；缺少 cwd 時，即使有 allowlist 也不會盲目 resume。超出範圍的 inspect 保留 metadata 並回 `redacted: true`，送達則直接拒絕。遠端 HAPI hub 目標不套用本機 cwd 範圍。
+
+`loopGuard.windowMs` 與 `loopGuard.maxMessages` 各自接受正的 safe integer，無效值分別使用 60000 毫秒與 10 則。原生工具及本機別名共用配對計數，hub `ping_peer` 也受限制；反向回覆是另一組配對。計數僅存在這次 plugin 啟用的記憶體中，重新啟動後歸零。
 
 `hapiHub` 欄位（全部可選，憑證可改用環境變數）：
 
