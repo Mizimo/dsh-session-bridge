@@ -51,6 +51,9 @@ const INSPECT_MAX_MESSAGE_LIMIT = 30
 const INSPECT_MESSAGE_CHARS = 600
 const INSPECT_MAX_BYTES = 16 * 1024
 
+/** In-flight fallback resumes, isolated by host context and session id. */
+const fallbackResumes = new WeakMap()
+
 /**
  * Guidance installed into every session agent that may use the bridge.
  *
@@ -172,8 +175,7 @@ async function listStoredPeers(ctx, caller, signal) {
     .filter((entry) => entry.sessionId !== caller.id && entry.agentAvailable !== true && entry.origin !== 'subagent')
     .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
   const query = ctx.get('sessionQuery')
-  const items = []
-  for (const entry of cold.slice(0, STORED_SESSION_LIMIT)) {
+  const items = await Promise.all(cold.slice(0, STORED_SESSION_LIMIT).map(async (entry) => {
     let title
     try {
       title = (await query?.readTitle?.(entry.sessionId, signal))?.title
@@ -183,8 +185,8 @@ async function listStoredPeers(ctx, caller, signal) {
     const item = { id: entry.sessionId, updatedAt: entry.updatedAt ?? 0 }
     if (title !== undefined) item.title = title
     if (entry.cwd !== undefined) item.cwd = entry.cwd
-    items.push(item)
-  }
+    return item
+  }))
   return { items, total: cold.length }
 }
 
@@ -399,7 +401,7 @@ function inspectMessages(events, limit) {
  * Read one session's metadata and recent message text from the host session
  * corpus. Read-only: it never resumes, wakes, or mutates the target.
  */
-async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, candidate } = {}) {
+async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, candidate, signal } = {}) {
   const query = ctx.get('sessionQuery')
   if (typeof query?.readSession !== 'function') {
     throw new Error('session_inspect requires the host session-query service, which this deployment does not compose')
@@ -407,7 +409,7 @@ async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, 
   const liveAgent = ctx.agents.get(sessionId)
   let loaded
   try {
-    loaded = await query.readSession(sessionId)
+    loaded = await query.readSession(sessionId, signal)
   } catch (error) {
     throw new Error(`cannot read session "${sessionId}": ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -423,14 +425,7 @@ async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, 
     if (typeof candidate === 'string' && candidate.trim() !== '') title = candidate
     break
   }
-  let persisted = false
-  try {
-    const records = await query.listSessions()
-    const record = Array.isArray(records) ? records.find((item) => item?.header?.id === sessionId) : undefined
-    if (record !== undefined) persisted = record.persisted === true
-  } catch {
-    // Status hints are optional; the log read above already succeeded.
-  }
+  const persisted = candidate?.persisted === true
   const targetCwd = typeof header.cwd === 'string' && header.cwd.trim() !== '' ? header.cwd : candidate?.cwd
   const lastEvent = events.at(-1)
   const session = { id: sessionId, live: liveAgent !== undefined, persisted }
@@ -475,7 +470,7 @@ async function resumeSetup(ctx, observation, selection) {
  * Resolve a session id to a live agent, cold-resuming a stored ordinary session
  * when the host composes the services that own that policy.
  */
-async function resolveTargetAgent(ctx, sessionId) {
+async function resolveTargetAgent(ctx, sessionId, signal) {
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
     if (!isOrdinarySessionRoot(ctx, live)) {
@@ -489,7 +484,7 @@ async function resolveTargetAgent(ctx, sessionId) {
     // model selection, de-duplication). Prefer it whenever the deployment
     // composes it; the manual composition below is the portable fallback.
     try {
-      const result = await controller.resolveAgent(sessionId)
+      const result = await controller.resolveAgent(sessionId, signal)
       if (result?.agent !== undefined) return { agent: result.agent, cold: true }
       return {
         agent: undefined,
@@ -500,6 +495,24 @@ async function resolveTargetAgent(ctx, sessionId) {
       return { agent: undefined, cold: false, reason: `session is not live and resume failed (${String(error)})` }
     }
   }
+  let pending = fallbackResumes.get(ctx)
+  if (pending === undefined) {
+    pending = new Map()
+    fallbackResumes.set(ctx, pending)
+  }
+  const existing = pending.get(sessionId)
+  if (existing !== undefined) return await existing
+  const resume = resumeStoredSession(ctx, sessionId, signal)
+  pending.set(sessionId, resume)
+  try {
+    return await resume
+  } finally {
+    pending.delete(sessionId)
+  }
+}
+
+/** Cold-resume one stored ordinary session when no session controller is available. */
+async function resumeStoredSession(ctx, sessionId, signal) {
   const sessionQuery = ctx.get('sessionQuery')
   const defaults = ctx.get('agentDefaultModel')
   if (typeof sessionQuery?.observeSession !== 'function' || typeof defaults?.currentSelection !== 'function') {
@@ -507,7 +520,7 @@ async function resolveTargetAgent(ctx, sessionId) {
   }
   let observation
   try {
-    observation = await sessionQuery.observeSession(sessionId)
+    observation = await sessionQuery.observeSession(sessionId, signal)
   } catch (error) {
     return { agent: undefined, cold: false, reason: `session is not live and its stored log could not be read (${String(error)})` }
   }
@@ -565,7 +578,7 @@ async function deliver(ctx, caller, targetRef, bodyText, options, kind, signal) 
   }
   signal?.throwIfAborted()
   loopGuard.check(caller.id, targetId)
-  const resolved = await resolveTargetAgent(ctx, targetId)
+  const resolved = await resolveTargetAgent(ctx, targetId, signal)
   if (resolved.agent === undefined) {
     throw new Error(`cannot reach session "${targetId}": ${resolved.reason}. Call session_list to see the sessions that are live.`)
   }
@@ -585,13 +598,13 @@ async function deliver(ctx, caller, targetRef, bodyText, options, kind, signal) 
   })
   signal?.throwIfAborted()
   target.steer(message)
+  loopGuard.note(caller.id, targetId)
   try {
     // Flush the target's committed session events before the sender reports
     // success. The steering itself becomes durable when the target's driver
     // takes it from the inbox; a crash in between can still lose the queued
     // message, so this narrows rather than fully closes that window.
     await ctx.get('sessions')?.flush?.(target.session)
-    loopGuard.note(caller.id, targetId)
   } catch {
     // A flush failure must not turn an accepted steer into a reported error.
   }
@@ -737,7 +750,7 @@ function localToolDefinitions(ctx, agent, options) {
       }),
       async execute(_args, exec) {
         const self = describeSession(ctx, agent)
-        const stored = await listStoredPeers(ctx, agent, exec.signal)
+        const stored = await listStoredPeers(ctx, agent, exec?.signal)
         return {
           self: { id: self.id, ...(self.title === undefined ? {} : { title: self.title }), ...(self.cwd === undefined ? {} : { cwd: self.cwd }) },
           sessions: listPeers(ctx, agent),
@@ -764,7 +777,7 @@ function localToolDefinitions(ctx, agent, options) {
       async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
         const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.target, { allPersisted: true, signal: exec?.signal })
-        return await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate })
+        return await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate, signal: exec?.signal })
       },
     }),
     defineTool({
@@ -917,7 +930,7 @@ function localCompatToolDefinitions(ctx, agent, options) {
       output: hapiListOutput,
       async execute(args, exec) {
         const limit = clampPeerLimit(args.limit)
-        const rows = await peerRows(ctx, agent, limit, exec.signal)
+        const rows = await peerRows(ctx, agent, limit, exec?.signal)
         return {
           peers: rows.map((row) => ({
             id: row.id,
@@ -941,7 +954,7 @@ function localCompatToolDefinitions(ctx, agent, options) {
       async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
         const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.sessionIdPrefix, { allPersisted: true, signal: exec?.signal })
-        const inspected = await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate })
+        const inspected = await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate, signal: exec?.signal })
         const session = inspected.session
         return {
           sessionId: session.id,
@@ -993,9 +1006,9 @@ function hubToolDefinitions(ctx, agent, options) {
         limit: { type: 'integer', description: 'Max sessions to return (default 30, HAPI max 100).' },
       },
       output: hapiListOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const limit = clampPeerLimit(args.limit)
-        const peers = await client.listPeers({ limit })
+        const peers = await client.listPeers({ limit, signal: exec?.signal })
         return { peers, total: peers.length }
       },
     }),

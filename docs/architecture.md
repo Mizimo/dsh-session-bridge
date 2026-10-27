@@ -25,7 +25,7 @@
 ## 枚舉
 
 - live session：`ctx.agents.roots()`，排除自己與 subagent child；狀態用 `agent.status`，標題用 `sessionTitle.get()`，`updatedAt` 由 `snapshotEvents(seq-1, seq)` 取得。
-- stored session：`ctx.get('sessionController').list()` + `sessionQuery.readTitle()`，最多列 30 筆，依最近活動排序。
+- stored session：`ctx.get('sessionController').list()` + `sessionQuery.readTitle()`，最多列 30 筆；標題並行讀取，輸出仍依最近活動排序，單筆標題讀取失敗不影響其他項目。
 - 兩者合併成 `session_list` 的 `sessions`／`stored`。
 
 ## 送達
@@ -43,20 +43,20 @@ const message = createUserMessage({
   source: { kind: 'agent-message', form: 'relay', senderSessionId: caller.id },
 })
 target.steer(message)
-await ctx.get('sessions')?.flush?.(target.session)
 loopGuard.note(caller.id, targetId)
+await ctx.get('sessions')?.flush?.(target.session)
 ```
 
 - `apply()` 建立共用的 scope 與 loop guard，傳入各 agent 的工具。`deliver()` 以解析候選的 cwd 檢查範圍，並檢查配對次數；這兩步都在取得／resume 目標 agent 之前，未知 workspace 在非 `host` 模式下直接拒絕。
 - `peerMessageText()` 把 bridge header、workspace 與 notice 放在標籤上方，peer 本文放在 `<peer-message>` 內；本文中的封裝標籤與 `[session-bridge]` 會轉義，不能冒充 bridge header。hub 同樣使用這個封裝，額外 header 提供自動訊息來源與回覆位址。
 - 跟 DSH 內建 Agent Teams 同一條 durable 通道；`steer` 在 idle 時會啟動新 turn，running 時在下一個 step 邊界插入。
 - `flush` 只保證「已提交的 session events」落盤，用來讓 sender 在回報成功前盡量收斂；剛進 inbox 的訊息要等 target driver 取用才進 log。
-- 本機在 steer／flush 成功後記錄配對時間，hub 則在送出成功後記錄。local 以完整目標 id 計數，hub 以正規化的目標參照字串計數；檢查時清除超過時間窗的紀錄。
+- 本機在 steer 接受訊息後立即記錄配對時間，flush 失敗也不會略過計數；hub 則在送出成功後記錄。local 以完整目標 id 計數，hub 以正規化的目標參照字串計數；檢查時清除超過時間窗的紀錄。
 - 目標不在記憶體時先 resume（見下），成功後回 `coldResumed: true`。
 
 ## 讀取
 
-- `sessionQuery.readSession(id)` 對 log 做完整 replay，**不會**把 session 變成 live。
+- `sessionQuery.readSession(id, signal)` 對 log 做完整 replay，**不會**把 session 變成 live；`persisted` 沿用解析候選的 metadata，不再重複列舉完整 corpus，缺值時回 `false`。
 - 以載入 header 的 cwd（缺少時使用解析候選的 cwd）檢查 scope；超出範圍時只回正常 metadata、空 messages、`truncated: false` 與 `redacted: true`，不抽取對話文字。
 - 逐 event 抽 `user/message` → `data.content`、`assistant/message` → `data.message.content`、`session/title` → `data.title`；tool call 只留名稱。
 - `user/message` 的來源在 `data.source`；`kind = 'agent-message'` 的訊息標 `fromAgent: true` 並保留 `senderSessionId` 供工具回傳。
@@ -64,13 +64,15 @@ loopGuard.note(caller.id, targetId)
 
 ## 冷啟動
 
-目標 session 存在但不在記憶體時，優先走 web bundle 的 `ctx.get('sessionController').resolveAgent(sessionId)`——這是 GUI 開 session 的同一條路徑，preset、模型選擇、去重都交給 host。
+目標 session 存在但不在記憶體時，優先走 web bundle 的 `ctx.get('sessionController').resolveAgent(sessionId, signal)`——這是 GUI 開 session 的同一條路徑，preset、模型選擇、去重都交給 host。
 
 沒有 session-controller 的 deployment 才用可攜 fallback：
 
-1. `sessionQuery.observeSession(id)` 讀 header；
+1. `sessionQuery.observeSession(id, signal)` 讀 header；
 2. `agentPresets.resolve(...)` 找 preset；
 3. `ctx.agents.resume({ resumeSessionId, agentOptions, setup })`，`setup` 內用 `installModelSelection`（0.2.0 是 `(agentCtx, selection)`、較新版本是單參數；fallback 用 `{ current: selection }` 呼叫，兩版都相容）＋ `preset.mount`。
+
+fallback 以 host context 與 session id 共用執行中的 Promise，並行送達會等待同一次冷啟動；Promise 完成或失敗後移除紀錄，允許後續重試。
 
 ## Reference 解析
 
