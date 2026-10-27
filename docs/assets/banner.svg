@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 240" width="1280" height="240" role="img" aria-label="兩個 DSH session 之間的橋">
+  <title>Session Bridge</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c1a34"/>
+      <stop offset="1" stop-color="#313157"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5a64a3"/>
+      <stop offset="0.5" stop-color="#bfd3ef"/>
+      <stop offset="1" stop-color="#5a64a3"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6a89d5" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#6a89d5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="240" fill="url(#bg)"/>
+
+  <!-- 深海裡的細碎光點 -->
+  <g fill="#bfd3ef" opacity="0.35">
+    <circle cx="96" cy="52" r="1.6"/>
+    <circle cx="182" cy="88" r="1.2"/>
+    <circle cx="252" cy="40" r="1.4"/>
+    <circle cx="404" cy="66" r="1.2"/>
+    <circle cx="864" cy="52" r="1.4"/>
+    <circle cx="1012" cy="74" r="1.2"/>
+    <circle cx="1104" cy="42" r="1.6"/>
+    <circle cx="1190" cy="96" r="1.2"/>
+  </g>
+
+  <!-- 節點的光暈 -->
+  <circle cx="300" cy="168" r="96" fill="url(#glow)"/>
+  <circle cx="980" cy="168" r="96" fill="url(#glow)"/>
+
+  <!-- 兩端：兩個 session -->
+  <circle cx="300" cy="168" r="28" fill="#1c1a34" stroke="#6a89d5" stroke-width="3"/>
+  <circle cx="300" cy="168" r="10" fill="#bfd3ef"/>
+  <circle cx="980" cy="168" r="28" fill="#1c1a34" stroke="#6a89d5" stroke-width="3"/>
+  <circle cx="980" cy="168" r="10" fill="#bfd3ef"/>
+
+  <!-- 橋：拱線與底線 -->
+  <path d="M300 168 Q 640 36 980 168" fill="none" stroke="url(#arc)" stroke-width="4" stroke-linecap="round"/>
+  <line x1="300" y1="168" x2="980" y2="168" stroke="#494a65" stroke-width="2" stroke-dasharray="2 10"/>
+
+  <!-- 橋上來回的訊息 -->
+  <circle cx="455" cy="114" r="5" fill="#6a89d5"/>
+  <circle cx="560" cy="86" r="6" fill="#bfd3ef"/>
+  <circle cx="640" cy="79" r="7" fill="#f0f4ff"/>
+  <circle cx="720" cy="86" r="6" fill="#bfd3ef"/>
+  <circle cx="825" cy="114" r="5" fill="#6a89d5"/>
+
+  <!-- 海底的浪 -->
+  <path d="M0 202 C 120 188 240 216 360 202 S 600 188 720 202 S 960 216 1080 202 S 1240 188 1280 202" fill="none" stroke="#494a65" stroke-width="2" opacity="0.8"/>
+  <path d="M0 218 C 140 206 260 230 400 218 S 660 204 800 218 S 1040 232 1160 218 S 1260 208 1280 218" fill="none" stroke="#494a65" stroke-width="1.5" opacity="0.45"/>
+</svg>
