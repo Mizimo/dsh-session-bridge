@@ -155,6 +155,8 @@ dsh plugin --profile <profile> remove dsh-session-bridge
 | `cold` | 重啟 instance（全冷）→ C 先 `session_inspect` 冷 A（`live:false`，且 A 仍冷）→ C 送訊息 → `coldResumed:true` 喚醒 → A 回 `COLD-PONG` → C 收到 | PASS |
 | `hapi` | `list_peers`／`inspect_peer`／`ping_peer` 對 throwaway HAPI session；hub API 直接驗證訊息送達、`[session-bridge]` 來源前綴、sender id 正確 | PASS |
 
+另在**全新 `DSH_HOME`（DSH Desktop 0.2.1-rc.2、stock CLI）** 上用 `github:` spec 安裝後跑 `probe`：PASS（`session_list` 工具在 stock 安裝上可用）。`e2e/` 的 harness 支援 `DSH_WEB_COOKIE`，可在需要瀏覽器 token 的 stock 安裝上跑。
+
 重跑工具在 `e2e/`：`start-test-instance.sh`／`stop-test-instance.sh`／`install-plugin-bundle.sh`／`bridge-e2e.mjs`（phases：`probe`／`inspect`／`dialogue`／`handoff`／`cold-prepare`→重啟→`cold`／`hapi`），用法見 `e2e/README.md`。`hapi` phase 需要 `HAPI_TEST_SESSION_ID`（我們的 throwaway session）與 token 環境變數，細節見 `e2e/testbed-notes.md`。
 
 ## 相容性

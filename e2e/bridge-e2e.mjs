@@ -28,6 +28,9 @@ import { join } from 'node:path'
 import { readFile, writeFile } from 'node:fs/promises'
 
 const BASE = (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3099').replace(/\/+$/, '')
+// Stock DSH installs challenge loopback requests with the browser token; the
+// testbed scripts pass the session cookie obtained from the `?token=` boot URL.
+const WEB_COOKIE = (process.env.DSH_WEB_COOKIE ?? '').trim()
 const TEST_BASE = process.env.TEST_BASE ?? join(homedir(), 'session-bridge-test')
 const CWD = join(TEST_BASE, 'workspace')
 const STATE = join(TEST_BASE, 'logs', 'bridge-e2e-state.json')
@@ -44,7 +47,7 @@ async function rpc(endpoint, args) {
   const rpcId = `e2e-${Date.now()}-${seq++}`
   const response = await fetch(`${BASE}/api/${endpoint}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(WEB_COOKIE === '' ? {} : { cookie: WEB_COOKIE }) },
     body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
   })
   const text = await response.text()
@@ -352,7 +355,7 @@ async function phaseHapi() {
   // instead of misreading a resume failure later as a ping_peer bug.
   const authResponse = await fetch(`${apiUrl}/api/auth`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(WEB_COOKIE === '' ? {} : { cookie: WEB_COOKIE }) },
     body: JSON.stringify({ accessToken }),
   })
   check(authResponse.ok, `hub auth failed: HTTP ${authResponse.status}`)

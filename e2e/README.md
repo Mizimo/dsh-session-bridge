@@ -48,3 +48,13 @@ rm -rf "$TEST_BASE"   # 整個隔離 home/workspace/logs 都是拋棄式的
 - 腳本預設拒絕 3080（DSH web 常見主服務 port），也拒絕在已被佔用的 port 啟動；stop 會用 port／`DSH_HOME`／cwd 三重確認 PID 才 SIGTERM，不會 `pkill dsh`。
 - 只操作 `TEST_BASE` 底下的隔離 `DSH_HOME`；主 `~/.dsh` 不讀不寫。
 - 不同機器可直接用（改 `TEST_BASE`／`TEST_PORT`／`DSH_BIN`）；同機多個測試床用不同 port 與 `TEST_BASE`。
+
+> **Loopback auth**: stock DSH installs answer loopback requests with `401` until a browser token is exchanged. Start the instance, take the `?token=...` URL from its log, exchange it for the session cookie, and pass that cookie to the harness:
+>
+> ```bash
+> curl -s -D headers.txt -o /dev/null -c cookie.jar "$TOKEN_URL"
+> COOKIE=$(grep -i '^set-cookie:' headers.txt | head -1 | sed -E 's/^[Ss]et-[Cc]ookie:[[:space:]]*([^;]+).*/\1/' | tr -d '\r')
+> export DSH_WEB_COOKIE="$COOKIE"
+> ```
+>
+> The patched testbed install in this repo's notes answers loopback directly, so it needs no cookie.

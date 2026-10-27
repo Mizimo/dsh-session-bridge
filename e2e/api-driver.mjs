@@ -38,6 +38,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 const BASE = (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3099').replace(/\/+$/, '')
+const WEB_COOKIE = (process.env.DSH_WEB_COOKIE ?? '').trim()
 const WS_BASE = BASE.replace(/^http/i, 'ws')
 const DEFAULT_CWD = process.env.DSH_DRIVER_CWD ?? join(homedir(), 'session-bridge-test', 'workspace')
 
@@ -52,7 +53,7 @@ async function rpc(endpoint, args, { quiet = false } = {}) {
   const body = JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } })
   const res = await fetch(`${BASE}/api/${endpoint}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(WEB_COOKIE === '' ? {} : { cookie: WEB_COOKIE }) },
     body,
   })
   const text = await res.text()
