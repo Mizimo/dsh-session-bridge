@@ -1,0 +1,71 @@
+{
+  "name": "dsh-session-bridge",
+  "version": "0.2.0",
+  "description": "Cross-session messaging and handoff for DeepSeek Harness: let the agents of different DSH sessions talk to each other, inspect peer logs, and interoperate with a HAPI hub.",
+  "license": "MIT",
+  "author": "Mizimo",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "hapi-hub.js",
+    "refs.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mizimo/dsh-session-bridge.git"
+  },
+  "homepage": "https://github.com/Mizimo/dsh-session-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Mizimo/dsh-session-bridge/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "bundle",
+    "agent",
+    "session",
+    "handoff",
+    "hapi"
+  ],
+  "engines": {
+    "dsh": ">=0.2.0-rc.1 <0.3.0",
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  }
+}

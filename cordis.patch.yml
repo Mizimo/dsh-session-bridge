@@ -1,0 +1,20 @@
+# Session Bridge bundle layer.
+#
+# One Host-only plugin row. `name` is this same package: the profile resolves
+# bundle-local plugin rows through the dsh installation and the profile scope,
+# so the linked package directory is enough — no npm publish step.
+#
+# Row config (all optional):
+#   enabled: true|false        host-local kill switch; `DSH_SESSION_BRIDGE_DISABLE=1` wins
+#   messageMaxBytes: 65536     per-message byte budget for session_send/relay bodies
+#   hapiCompat: 'auto'|'local'|'hub'|false
+#                              HAPI-named peer tools; auto = hub when hapiHub/env is
+#                              configured, else local aliases over DSH sessions
+#   hapiHub: {apiUrl, accessToken?, extraHeaders?, selfSessionId?, timeoutMs?, waitActiveSecs?}
+#                              only for hapiCompat hub; apiUrl/accessToken may also
+#                              come from HAPI_API_URL/CLI_API_TOKEN, extra headers from
+#                              HAPI_EXTRA_HEADERS_JSON, self id from HAPI_SESSION_ID
+- insert:
+    - id: session-bridge
+      name: 'dsh-session-bridge'
+      config: {}

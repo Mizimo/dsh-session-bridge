@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Bridge",
+    "description": "Let the agents of different DSH sessions message each other and hand off work."
+  }
+}

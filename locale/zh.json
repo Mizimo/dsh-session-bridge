@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Bridge",
+    "description": "讓不同 DSH session 的 agent 互相傳訊息、交接工作。"
+  }
+}
