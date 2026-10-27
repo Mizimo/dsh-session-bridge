@@ -1,5 +1,7 @@
 # E2E 驗證工具
 
+驗證內容與驗證矩陣見 [`docs/testing.md`](../docs/testing.md)；這裡只說明怎麼操作測試床。
+
 這組腳本在**隔離的 DSH instance** 上驗證 session-bridge：獨立 `DSH_HOME`、loopback-only 測試 port、不動使用者的主 `dsh web` 服務。
 
 ## 前置條件（測試機上）

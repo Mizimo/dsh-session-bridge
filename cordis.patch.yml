@@ -6,7 +6,7 @@
 #
 # Row config (all optional):
 #   enabled: true|false        host-local kill switch; `DSH_SESSION_BRIDGE_DISABLE=1` wins
-#   messageMaxBytes: 65536     per-message byte budget for session_send/relay bodies
+#   maxMessageBytes: 65536     per-message byte budget for session_send/relay bodies
 #   hapiCompat: 'auto'|'local'|'hub'|false
 #                              HAPI-named peer tools; auto = hub when hapiHub/env is
 #                              configured, else local aliases over DSH sessions

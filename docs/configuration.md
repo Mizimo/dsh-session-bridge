@@ -1,0 +1,71 @@
+# 設定
+
+外掛是單純的 Host-only bundle，全部設定都在 profile 的 Cordis patch row 或環境變數，沒有 client 設定。
+
+## Row config
+
+裝好之後，profile 的 `cordis.patch.yml`（或任何較高優先的 patch 層）可以覆寫這個 row：
+
+```yaml
+- id: session-bridge
+  config:
+    enabled: true
+    maxMessageBytes: 65536
+    hapiCompat: auto
+    hapiHub:
+      apiUrl: http://127.0.0.1:3006
+      # accessToken: 建議改用 CLI_API_TOKEN 環境變數
+```
+
+| 欄位 | 型別 | 預設 | 說明 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | `false` 時完全不註冊工具（含 system prompt 段）。 |
+| `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
+| `hapiCompat` | `auto` \| `local` \| `hub` \| `false` | `auto` | HAPI 同名工具要接到哪裡；見 [HAPI 相容](hapi.md)。 |
+| `hapiHub` | object | — | 只有 `hub` 模式需要，欄位見下。 |
+
+`hapiHub` 欄位（全部可選，憑證可改用環境變數）：
+
+| 欄位 | 說明 |
+| --- | --- |
+| `apiUrl` | HAPI hub base URL。優先序：row config > `HAPI_API_URL` > `http://127.0.0.1:3006`。 |
+| `accessToken` | HAPI 的 CLI access token。優先序：row config > `CLI_API_TOKEN`。 |
+| `extraHeaders` | 額外 HTTP header（HAPI 的 namespace／反代場景）；`HAPI_EXTRA_HEADERS_JSON` 可給 JSON 字串。 |
+| `selfSessionId` | 這個 DSH process 在 HAPI 上的 session id；預設讀 `HAPI_SESSION_ID`。拿來排除自己、並在 `ping_peer` 訊息附回覆位址。 |
+| `timeoutMs` | 一般 hub 請求 timeout，預設 20000；resume／送訊息另有 30 秒上限。 |
+| `waitActiveSecs` | resume 後等 session 變 active 的上限，預設 60 秒。 |
+
+## 環境變數
+
+| 變數 | 作用 |
+| --- | --- |
+| `DSH_SESSION_BRIDGE_DISABLE=1` | 全域 kill switch，優先於 row config；`1` 或 `true`。 |
+| `HAPI_API_URL` | hub URL（`hapiCompat` 為 `hub`／`auto` 時）。 |
+| `CLI_API_TOKEN` | HAPI CLI access token；**建議用這個而不是把 token 寫進 YAML**。 |
+| `HAPI_EXTRA_HEADERS_JSON` | JSON 物件，附加到每個 hub 請求。 |
+| `HAPI_SESSION_ID` | 由 `hapi dsh` 啟動時 HAPI 會 export；plugin 用它排除自己並提供回覆位址。 |
+| `HAPI_DISABLE_PEER_TOOLS` | HAPI 原生 kill switch；`1`／`true`／`yes` 時連同名相容工具都不註冊（跟 HAPI 行為一致）。 |
+
+## 憑證安全
+
+- token 寫進 profile config 就是**明文**，會進 profile 的 `package.json`／`cordis.patch.yml` 或 patch 檔；優先用 `CLI_API_TOKEN` 環境變數（systemd `EnvironmentFile`、shell profile 等），並確保檔案權限 600。
+- 不要把 token commit、貼進 issue/log、或寫進 session 可讀的檔案。
+- plugin 不會把 token 放進工具回傳、錯誤訊息或 system prompt；hub client 失敗只印 warning。
+
+## 生效與驗證
+
+- 改 config／環境變數後要**重啟 profile 的 dsh process**；bundle 的 JS 與 patch row 都不熱重載。
+- `web` profile 的 row 是 optional：載入失敗只會印 `dsh: warning: 1 entry did not activate`，不會擋開機。所以驗證方式是「新 session 裡有沒有 `session_list`」，不是只看 process 起來。
+- 用 `dsh --profile <name> --dump-config` 可以在啟動前確認 composition 裡有 `- id: session-bridge`。
+
+## 關閉與移除
+
+- 暫時關閉：row config `enabled: false`，或 `DSH_SESSION_BRIDGE_DISABLE=1`（環境變數優先）。
+- 只關 HAPI 別名：`hapiCompat: false`（原生 `session_*` 工具不受影響）。
+- 移除 bundle：
+
+```sh
+dsh plugin --profile <profile> remove dsh-session-bridge
+```
+
+移除後同樣要重啟。
