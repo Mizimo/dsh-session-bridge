@@ -23,9 +23,10 @@
 # 3. 重啟讓 bundle 生效
 ./stop-test-instance.sh && ./start-test-instance.sh
 
-# 4. 跑 phase（v0.2 共七個；hapi 可選，需要 hub 設定 + 拋棄式 HAPI session）
+# 4. 跑 phase（共八個；hapi 可選，需要 hub 設定 + 拋棄式 HAPI session）
 export DSH_WEB_URL=http://127.0.0.1:3099 TEST_BASE=$HOME/session-bridge-test
 node bridge-e2e.mjs probe
+node bridge-e2e.mjs discovery        # 只用人話，不加工具名／id／前綴
 node bridge-e2e.mjs inspect          # session_inspect 唯讀 + 8 碼前綴解析
 node bridge-e2e.mjs dialogue
 node bridge-e2e.mjs handoff
@@ -41,7 +42,7 @@ node bridge-e2e.mjs hapi
 rm -rf "$TEST_BASE"   # 整個隔離 home/workspace/logs 都是拋棄式的
 ```
 
-`probe` 驗證 plugin 真的載入（會呼叫 `session_list`）；`inspect` 驗證 `session_inspect` 的唯讀讀取、前綴解析、`fromAgent` 來源標記；`dialogue` 驗證雙向送達與 log 來源標記；`handoff` 驗證交接 body 與回報；`cold` 驗證重啟後能「先讀不喚醒、再送喚醒」冷 session 並收到回覆；`hapi` 驗證 `list_peers`／`inspect_peer`／`ping_peer` 對真 HAPI hub 的讀取與送達（並直接查 hub API 驗證 `[session-bridge]` 來源前綴與 sender id）。每個 phase 會印 JSON 證據，失敗會 exit 1。
+`probe` 驗證 plugin 真的載入（會呼叫 `session_list`）；`discovery` 只給人話（不提工具名、session id、前綴），驗證模型能自己找 peer、先唯讀 inspect、再送訊息；`inspect` 驗證 `session_inspect` 的唯讀讀取、前綴解析、`fromAgent` 來源標記；`dialogue` 驗證雙向送達與 log 來源標記；`handoff` 驗證交接 body 與回報；`cold` 驗證重啟後能「先讀不喚醒、再送喚醒」冷 session 並收到回覆；`hapi` 驗證 `list_peers`／`inspect_peer`／`ping_peer` 對真 HAPI hub 的讀取與送達（並直接查 hub API 驗證 `[session-bridge]` 來源前綴與 sender id）。每個 phase 會印 JSON 證據，失敗會 exit 1。
 
 `testbed-notes.md` 是驗證時累積的測試床筆記（架構、API wire 格式、踩過的坑），重跑前值得先看。
 

@@ -7,6 +7,8 @@
  * Phases:
  *
  *   probe     create A, prompt A to call session_list, dump raw event evidence
+ *   discovery human-style request only (no tool names, ids or prefixes): A must
+ *             find a peer from session_list, inspect it read-only, then message it
  *   dialogue  A sends B a PING, B replies PONG to A (live, both directions)
  *   handoff   A hands work to B with session_handoff, B reports back
  *   inspect   A sends B a message, then reads B's log with session_inspect
@@ -25,7 +27,7 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 
 const BASE = (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3099').replace(/\/+$/, '')
 // Stock DSH installs challenge loopback requests with the browser token; the
@@ -214,6 +216,67 @@ async function phaseProbe() {
   check(/PROBE-OK/.test(text), `probe reply missing PROBE-OK: ${JSON.stringify(text)}`)
   await saveState({ a })
   log('PROBE: PASS')
+}
+
+/**
+ * Human-style discovery: the prompt never names a tool, a session id or a
+ * prefix. It only describes the peer's work (a unique working-directory suffix)
+ * and asks A to find it, read its progress and message it. This is the phase
+ * that proves the shipped tool descriptions + policy section are enough for a
+ * model to pick the right tools on its own.
+ */
+async function phaseDiscovery() {
+  const token = randomUUID().slice(0, 8)
+  const bCwd = join(CWD, `login-page-${token}`)
+  await mkdir(bCwd, { recursive: true })
+  const b = await createSession(bCwd)
+  log(`B = ${b} (cwd ends with login-page-${token})`)
+  await promptSession(b, 'You are the session refactoring the login page. Do not start any work yet. Reply with only: LOGIN-READY')
+  await waitForAssistantText(b, /LOGIN-READY/, 'B seed turn')
+  const a = await createSession()
+  log(`A = ${a}`)
+
+  await promptSession(a, [
+    `Another session on this host is refactoring the login page; its working directory ends with "login-page-${token}".`,
+    'Find it, check what it has done so far, then ask it to continue with the next step and report back to you.',
+    'Do not change any files yourself.',
+  ].join('\n'))
+
+  const matchesPeer = (callTarget) => {
+    const target = String(callTarget ?? '').trim()
+    if (target === '' || target === 'session-') return false
+    const strip = (id) => (id.startsWith('session-') ? id.slice('session-'.length) : id)
+    return target === b || strip(b).startsWith(strip(target))
+  }
+  const discovered = await waitFor(async () => {
+    const page = await pageOf(a)
+    const calls = toolCalls(page)
+    const deliver = calls.find((call) => (call.name === 'session_send' || call.name === 'session_handoff') && matchesPeer(call.args?.target))
+    return deliver === undefined ? undefined : { page, calls, deliver }
+  }, { label: 'A to discover B and message it from a human-style request' })
+  const names = discovered.calls.map((call) => call.name)
+  log(`A tool sequence: ${JSON.stringify(names)}`)
+  check(names.includes('session_list'), `A never called session_list; sequence=${JSON.stringify(names)}`)
+  check(names.includes('session_inspect'), `A messaged without a read-only look first; sequence=${JSON.stringify(names)}`)
+  const inspectAt = names.indexOf('session_inspect')
+  const deliverAt = names.indexOf(discovered.deliver.name)
+  check(inspectAt !== -1 && inspectAt < deliverAt, `A messaged before inspecting the peer; sequence=${JSON.stringify(names)}`)
+  const inspected = discovered.calls.find((call) => call.name === 'session_inspect')
+  check(matchesPeer(inspected?.args?.target), `A inspected something other than B: ${JSON.stringify(inspected?.args)}`)
+  log(`discovery call: ${discovered.deliver.name} args=${JSON.stringify(discovered.deliver.args).slice(0, 500)}`)
+
+  const bPage = await waitFor(async () => {
+    const page = await pageOf(b)
+    return userMessages(page).some((entry) => entry.source?.kind === 'agent-message' && entry.source?.senderSessionId === a) ? page : undefined
+  }, { label: 'B to receive the discovered message' })
+  const relay = userMessages(bPage).find((entry) => entry.source?.kind === 'agent-message' && entry.source?.senderSessionId === a)
+  const relayText = JSON.stringify(relay.message ?? '')
+  check(relayText.includes('[session-bridge]'), `relayed message is missing the bridge marker: ${relayText.slice(0, 600)}`)
+  check(relayText.includes(token) || /login/i.test(relayText), `relayed message does not reference the login-page task; got: ${relayText.slice(0, 600)}`)
+  await dumpEvidence('A discovery page', a)
+  await dumpEvidence('B received message', b)
+  await saveState({ a, b })
+  log('DISCOVERY: PASS')
 }
 
 async function phaseDialogue() {
@@ -515,6 +578,7 @@ const phase = process.argv[2]
 try {
   switch (phase) {
     case 'probe': await phaseProbe(); break
+    case 'discovery': await phaseDiscovery(); break
     case 'dialogue': await phaseDialogue(); break
     case 'handoff': await phaseHandoff(); break
     case 'inspect': await phaseInspect(); break
@@ -522,7 +586,7 @@ try {
     case 'cold': await phaseCold(); break
     case 'hapi': await phaseHapi(); break
     default:
-      console.error('usage: bridge-e2e.mjs <probe|dialogue|handoff|inspect|cold-prepare|cold|hapi>')
+      console.error('usage: bridge-e2e.mjs <probe|discovery|dialogue|handoff|inspect|cold-prepare|cold|hapi>')
       process.exit(2)
   }
   log(`rpc calls: ${calls.length}`)

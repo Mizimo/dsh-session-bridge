@@ -24,6 +24,7 @@ HAPI hub client 用注入的 `fetch` 打 mock，不需要真 hub。plugin 本体
 | Phase | 驗證內容 | 結果 |
 | --- | --- | --- |
 | `probe` | plugin 載入、`session_list` 可呼叫、stored 清單欄位存在 | PASS |
+| `discovery` | 只用人話（不提工具名／session id／前綴）要求 A 找「正在改登入頁」的 peer、讀進度、送訊息；斷言 A 自己依序用 `session_list`→`session_inspect`→`session_send`，且 B 收到 `[session-bridge]` 訊息 | 待跑 |
 | `inspect` | 送訊息給 B 後，用 B 的 uuid 前綴 `session_inspect`：讀到目標、`live:true`、relay 訊息 `fromAgent:true`、assistant 文字 | PASS |
 | `dialogue` | A→B `PING`、B→A `PONG` 雙向送達；log 內 `source.kind='agent-message'`、`senderSessionId` 正確 | PASS |
 | `handoff` | summary／task／回報指示完整送達；B 用 `session_send` 回報 `HANDOFF-OK`，A 收到 | PASS |
@@ -43,6 +44,7 @@ HAPI hub client 用注入的 `fetch` 打 mock，不需要真 hub。plugin 本体
 # 3. 依序跑 phase
 export DSH_WEB_URL=http://127.0.0.1:3099 TEST_BASE=$HOME/session-bridge-test
 node e2e/bridge-e2e.mjs probe
+node e2e/bridge-e2e.mjs discovery
 node e2e/bridge-e2e.mjs inspect
 node e2e/bridge-e2e.mjs dialogue
 node e2e/bridge-e2e.mjs handoff
