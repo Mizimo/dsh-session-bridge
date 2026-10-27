@@ -418,7 +418,7 @@ async function phaseHapi() {
   // instead of misreading a resume failure later as a ping_peer bug.
   const authResponse = await fetch(`${apiUrl}/api/auth`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(WEB_COOKIE === '' ? {} : { cookie: WEB_COOKIE }) },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ accessToken }),
   })
   check(authResponse.ok, `hub auth failed: HTTP ${authResponse.status}`)

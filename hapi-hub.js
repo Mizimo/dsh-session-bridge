@@ -40,9 +40,9 @@ const DEFAULT_MESSAGE_LIMIT = 30
 const MAX_SNIPPET_CHARS = 1_200
 const MAX_LABEL_CHARS = 255
 
-/** Typed hub failure, mirroring HAPI's `PingPeerErrorCode`. */
+/** Typed hub failure, extending HAPI's `PingPeerErrorCode` for connectivity. */
 export class HapiHubError extends Error {
-  /** @param {'bad_args'|'disabled'|'auth_failed'|'not_found'|'ambiguous'|'resume_failed'|'timeout'|'send_failed'} code */
+  /** @param {'bad_args'|'disabled'|'auth_failed'|'unavailable'|'not_found'|'ambiguous'|'resume_failed'|'timeout'|'send_failed'} code */
   constructor(code, message) {
     super(message)
     this.name = 'HapiHubError'
@@ -107,9 +107,11 @@ function messageSnippet(content) {
   if (collapsed === '') return null
   // Only real conversation roles; a system/tool row would be misattributed.
   if (role !== 'user' && role !== 'assistant') return null
+  const truncated = collapsed.length > MAX_SNIPPET_CHARS
   return {
     role,
-    text: collapsed.length > MAX_SNIPPET_CHARS ? `${collapsed.slice(0, MAX_SNIPPET_CHARS - 1)}…` : collapsed,
+    text: truncated ? `${collapsed.slice(0, MAX_SNIPPET_CHARS - 1)}…` : collapsed,
+    truncated,
   }
 }
 
@@ -162,6 +164,8 @@ export function createHapiHubClient(config = {}) {
   const waitActiveSecs = Number.isFinite(config.waitActiveSecs) && config.waitActiveSecs > 0
     ? config.waitActiveSecs
     : DEFAULT_WAIT_ACTIVE_SECS
+  const pollActiveMs = Number.isSafeInteger(config.pollActiveMs) && config.pollActiveMs > 0 ? config.pollActiveMs : POLL_ACTIVE_MS
+  const pollPiReadyMs = Number.isSafeInteger(config.pollPiReadyMs) && config.pollPiReadyMs > 0 ? config.pollPiReadyMs : POLL_PI_READY_MS
 
   let jwt
   let authInFlight
@@ -173,25 +177,48 @@ export function createHapiHubClient(config = {}) {
     return AbortSignal.any([signal, timeout])
   }
 
+  /** Classify HTTP failures shared by auth, reads, resume and send. */
+  function checkResponseStatus(response, url) {
+    if (response.status >= 500 && response.status < 600) {
+      throw new HapiHubError('unavailable', `hub returned HTTP ${response.status}. URL: ${url}.`)
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new HapiHubError('auth_failed', `hub authentication failed (HTTP ${response.status}). URL: ${url}.`)
+    }
+    if (response.status === 404) {
+      throw new HapiHubError('not_found', `hub resource not found (HTTP 404). URL: ${url}.`)
+    }
+  }
+
+  /** Include fetch's underlying connection error when it supplies one. */
+  function connectionFailure(error, url) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const cause = error?.cause instanceof Error ? `: ${error.cause.message}` : ''
+    return new HapiHubError('unavailable', `hub connection failed (${detail}${cause}). URL: ${url}.`)
+  }
+
   /** Exchange the access token for a hub JWT (single flight). */
-  async function authenticate(force = false) {
+  async function authenticate(force = false, signal) {
     if (!force && typeof jwt === 'string') return jwt
     if (authInFlight !== undefined) return authInFlight
     authInFlight = (async () => {
+      const url = `${apiUrl}/api/auth`
       let response
       try {
-        response = await fetch(`${apiUrl}/api/auth`, {
+        response = await fetch(url, {
           method: 'POST',
           headers: { ...extraHeaders, 'Content-Type': 'application/json' },
           body: JSON.stringify({ accessToken }),
-          signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
+          signal: requestSignal(signal, AUTH_TIMEOUT_MS),
         })
       } catch (error) {
+        if (signal?.aborted === true) throw new HapiHubError('disabled', 'hub request cancelled')
         if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
           throw new HapiHubError('timeout', `hub auth timed out after ${AUTH_TIMEOUT_MS}ms. Hub URL: ${apiUrl}.`)
         }
-        throw new HapiHubError('auth_failed', `hub auth request failed (${error instanceof Error ? error.message : String(error)}). Hub URL: ${apiUrl}.`)
+        throw connectionFailure(error, url)
       }
+      checkResponseStatus(response, url)
       const data = await response.json().catch(() => null)
       const token = typeof data?.token === 'string' ? data.token : ''
       if (!response.ok || token === '') {
@@ -210,7 +237,7 @@ export function createHapiHubClient(config = {}) {
 
   /** One authenticated hub request with a single re-auth retry. */
   async function request(path, { method = 'GET', body, params, signal, timeoutMs: callTimeoutMs } = {}) {
-    let token = await authenticate()
+    let token = await authenticate(false, signal)
     for (let attempt = 0; attempt < 2; attempt++) {
       const url = new URL(`${apiUrl}${path}`)
       if (params !== undefined) {
@@ -235,12 +262,13 @@ export function createHapiHubClient(config = {}) {
         if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
           throw new HapiHubError('timeout', `hub request timed out. Hub URL: ${apiUrl}.`)
         }
-        throw new HapiHubError('auth_failed', `hub request failed (${error instanceof Error ? error.message : String(error)}). Hub URL: ${apiUrl}.`)
+        throw connectionFailure(error, url)
       }
       if (response.status === 401 && attempt === 0) {
-        token = await authenticate(true)
+        token = await authenticate(true, signal)
         continue
       }
+      checkResponseStatus(response, url)
       const data = await response.json().catch(() => null)
       return { status: response.status, ok: response.ok, data }
     }
@@ -273,10 +301,10 @@ export function createHapiHubClient(config = {}) {
   }
 
   /** Resolve a reference (bare id/prefix/citation) to one hub session. */
-  async function resolveSession(rawRef) {
+  async function resolveSession(rawRef, signal) {
     const normalized = normalizeSessionRef(rawRef)
     if (normalized === '') throw new HapiHubError('bad_args', 'session reference is empty or contains several /sessions/<id> citations')
-    const summaries = await listSessionSummaries({ order: 'updatedAt' })
+    const summaries = await listSessionSummaries({ order: 'updatedAt', signal })
     const ids = summaries.map((summary) => String(summary?.id ?? '')).filter((id) => id !== '')
     const match = matchSessionRef(ids, normalized)
     if (match.id !== undefined) {
@@ -305,13 +333,15 @@ export function createHapiHubClient(config = {}) {
     }
     const rows = Array.isArray(result.data?.messages) ? result.data.messages : []
     const messages = []
+    let truncated = false
     for (const row of rows) {
       if (row === null || typeof row !== 'object') continue
       const snippet = messageSnippet(row.content)
       if (snippet === null) continue
+      if (snippet.truncated) truncated = true
       messages.push({ role: snippet.role === 'user' ? 'user' : snippet.role === 'assistant' ? 'assistant' : 'user', text: snippet.text })
     }
-    return messages
+    return { messages, truncated }
   }
 
   /** Wait until the hub reports the session active. */
@@ -320,7 +350,7 @@ export function createHapiHubClient(config = {}) {
     while (Date.now() < deadline) {
       const summary = await getSessionSummary(sessionId, signal)
       if (summary?.active === true) return summary
-      await sleep(POLL_ACTIVE_MS, signal)
+      await sleep(pollActiveMs, signal)
     }
     throw new HapiHubError('timeout', `session did not become active within ${waitActiveSecs}s; the HAPI runner may have failed to spawn`)
   }
@@ -332,7 +362,7 @@ export function createHapiHubClient(config = {}) {
       const summary = await getSessionSummary(sessionId, signal)
       const piSessionId = summary?.metadata?.piSessionId
       if (typeof piSessionId === 'string' && piSessionId !== '') return summary
-      await sleep(POLL_PI_READY_MS, signal)
+      await sleep(pollPiReadyMs, signal)
     }
     throw new HapiHubError('timeout', `piSessionId never appeared within ${waitActiveSecs}s; refusing to send because the session would wedge`)
   }
@@ -344,9 +374,9 @@ export function createHapiHubClient(config = {}) {
     selfSessionId,
 
     /** List peer sessions, newest update first, excluding this session. */
-    async listPeers({ limit } = {}) {
+    async listPeers({ limit, signal } = {}) {
       const clamped = clampListLimit(limit)
-      const summaries = await listSessionSummaries({ limit: clamped + 2, order: 'updatedAt' })
+      const summaries = await listSessionSummaries({ limit: clamped + 2, order: 'updatedAt', signal })
       const peers = summaries
         .filter((summary) => summary?.id !== undefined && summary.id !== selfSessionId)
         .sort((left, right) => (Number(right.updatedAt) || 0) - (Number(left.updatedAt) || 0))
@@ -363,12 +393,12 @@ export function createHapiHubClient(config = {}) {
 
     /** Read a peer's metadata and recent message text without resuming it. */
     async inspectPeer({ sessionIdPrefix, messageLimit, signal } = {}) {
-      const { summary: listed } = await resolveSession(sessionIdPrefix)
+      const { summary: listed } = await resolveSession(sessionIdPrefix, signal)
       const sessionId = String(listed.id)
       // HAPI re-reads the session before its messages; keep freshness and the
       // not_found check between the list snapshot and the messages page.
       const summary = await getSessionSummary(sessionId, signal)
-      const messages = await fetchMessages(sessionId, messageLimit, signal)
+      const { messages, truncated } = await fetchMessages(sessionId, messageLimit, signal)
       return {
         sessionId,
         path: `/sessions/${sessionId}`,
@@ -380,7 +410,7 @@ export function createHapiHubClient(config = {}) {
         ...(typeof summary.metadata?.path === 'string' ? { cwd: summary.metadata.path } : {}),
         ...(typeof summary.updatedAt === 'number' ? { updatedAt: summary.updatedAt } : {}),
         messages,
-        truncated: false,
+        truncated,
       }
     },
 
@@ -388,10 +418,10 @@ export function createHapiHubClient(config = {}) {
     async pingPeer({ sessionIdPrefix, message, signal } = {}) {
       const body = typeof message === 'string' ? message : ''
       if (body.trim() === '') throw new HapiHubError('bad_args', 'message is required')
-      const { summary } = await resolveSession(sessionIdPrefix)
+      const { summary } = await resolveSession(sessionIdPrefix, signal)
       const sessionId = String(summary.id)
       if (sessionId === selfSessionId) throw new HapiHubError('bad_args', 'ping_peer cannot target the calling session itself')
-      let resumed = false
+      let resumeCount = 0
 
       /** Ensure the session is active, resuming it when necessary. */
       async function ensureActive() {
@@ -403,7 +433,8 @@ export function createHapiHubClient(config = {}) {
           signal,
           timeoutMs: RESUME_TIMEOUT_MS,
         })
-        if (resumeResult.data?.type !== 'success') {
+        resumeCount += 1
+        if (!resumeResult.ok || resumeResult.data?.type !== 'success') {
           const detail = typeof resumeResult.data?.message === 'string'
             ? resumeResult.data.message
             : typeof resumeResult.data?.error === 'string'
@@ -413,23 +444,23 @@ export function createHapiHubClient(config = {}) {
                 : `HTTP ${resumeResult.status}`
           throw new HapiHubError('resume_failed', `resume failed: ${detail}`)
         }
-        resumed = true
         current = await waitUntilActive(sessionId, signal)
         return current
       }
 
-      let live = await ensureActive()
-      if (live?.metadata?.flavor === 'pi') {
-        live = await waitForPiReady(sessionId, signal)
-        const resumedBefore = resumed
-        live = await ensureActive()
-        // A resume during the post-Pi re-check must wait for piSessionId again
-        // (hapi#1143) or the first message can wedge the Pi session.
-        if (resumed !== resumedBefore && live?.metadata?.flavor === 'pi') {
-          live = await waitForPiReady(sessionId, signal)
-          live = await ensureActive()
+      /** Re-check Pi readiness after every resume, including repeated drops. */
+      async function ensureReady() {
+        let current = await ensureActive()
+        while (current?.metadata?.flavor === 'pi') {
+          await waitForPiReady(sessionId, signal)
+          const resumedBefore = resumeCount
+          current = await ensureActive()
+          if (resumeCount === resumedBefore) return current
         }
+        return current
       }
+
+      let live = await ensureReady()
       // A stable localId makes a retried send idempotent on the hub; the 409
       // `session_inactive` response means "resume again, then send once more".
       const localId = randomUUID()
@@ -441,7 +472,7 @@ export function createHapiHubClient(config = {}) {
       })
       let sendResult = await postMessage()
       if (!sendResult.ok && sendResult.status === 409 && sendResult.data?.code === 'session_inactive') {
-        live = await ensureActive()
+        live = await ensureReady()
         sendResult = await postMessage()
       }
       if (!sendResult.ok || sendResult.data?.ok !== true) {
@@ -452,7 +483,7 @@ export function createHapiHubClient(config = {}) {
             : `HTTP ${sendResult.status}`
         throw new HapiHubError('send_failed', `send failed: ${detail}`)
       }
-      return { sessionId, name: sessionLabel(live ?? summary), resumed }
+      return { sessionId, name: sessionLabel(live ?? summary), resumed: resumeCount > 0 }
     },
   }
 }

@@ -34,10 +34,10 @@ hub mode 需要的設定：
 
 - id 以**唯一前綴**解析；撞號回 `ambiguous`，找不到回 `not_found`。
 - `list_peers` 依 `updatedAt` 新到舊排序，排除自己（`HAPI_SESSION_ID`），預設 30、上限 100。
-- `inspect_peer` **唯讀**，不會 resume；回傳 metadata + 最近訊息文字。
+- `inspect_peer` **唯讀**，不會 resume；回傳 metadata + 最近訊息文字。文字先合併空白，每則超過 1200 字元時截斷並加省略號；任一回傳訊息被截斷時，頂層 `truncated` 為 `true`，否則為 `false`。
 - `ping_peer` 對 inactive session 先 `POST /api/sessions/:id/resume`，再輪詢等 active（2 秒間隔、最多 60 秒；pi session 另外等 `piSessionId` 出現），最後送訊息。
-- 錯誤分型：`bad_args`、`disabled`、`auth_failed`、`not_found`、`ambiguous`、`resume_failed`、`timeout`、`send_failed`。
-- 送訊息用穩定的 `localId`；hub 回 409 `session_inactive` 時會重新確認 active 再送一次。
+- 錯誤分型：`bad_args`、`disabled`、`auth_failed`、`unavailable`、`not_found`、`ambiguous`、`resume_failed`、`timeout`、`send_failed`。連線失敗或 HTTP 5xx 回 `unavailable`；401／403 或認證交換失敗回 `auth_failed`；呼叫端取消回 `disabled`。
+- 送訊息用穩定的 `localId`；hub 回 409 `session_inactive` 時會重新確認 active 與 Pi 就緒狀態再送一次。每次 resume 後都會重新等待 `piSessionId`。
 
 ## Wire（hub 模式用到的 API）
 
