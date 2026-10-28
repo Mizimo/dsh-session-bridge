@@ -33,8 +33,9 @@ export function hapiPeerToolsDisabledByEnv(env = process.env) {
 }
 
 /**
- * Resolve local aliases or hub tools. Auto requires a hub block or both hub
- * environment values; explicit hub mode leaves validation to the client.
+ * Resolve local aliases or hub tools. Auto picks the hub for a hub block or a
+ * non-empty CLI_API_TOKEN, as v0.2.1 did; explicit hub mode leaves validation
+ * to the client.
  */
 export function compatibilityOf(config, env = process.env) {
   if (hapiPeerToolsDisabledByEnv(env)) return null
@@ -44,8 +45,9 @@ export function compatibilityOf(config, env = process.env) {
   const hub = config?.hapiHub
   const configuredHub = hub !== null && typeof hub === 'object' && !Array.isArray(hub)
   if (requested === 'hub') return { mode: 'hub', hub: configuredHub ? hub : {}, explicit: true }
-  const envHub = typeof env?.HAPI_API_URL === 'string' && env.HAPI_API_URL.trim() !== ''
-    && typeof env?.CLI_API_TOKEN === 'string' && env.CLI_API_TOKEN.trim() !== ''
+  // HAPI never mirrors CLI_API_TOKEN into wrapped agents, but when a user does
+  // export it the default hub URL applies, so a token alone is enough.
+  const envHub = typeof env?.CLI_API_TOKEN === 'string' && env.CLI_API_TOKEN.trim() !== ''
   return configuredHub || envHub
     ? { mode: 'hub', hub: configuredHub ? hub : {}, explicit: false }
     : { mode: 'local' }

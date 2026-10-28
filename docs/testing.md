@@ -10,11 +10,11 @@ npm test
 
 `npm test` 執行 `node --import ./test-support/register.mjs --test`，不需要安裝 DSH 或其他測試依賴（Node 20+）。CI 設定在 Node 20／22／24 上跑。涵蓋：
 
-- `test/index.test.mjs`：透過真正的 `apply()` 與註冊後的工具驗證生命週期／卸載、kill switch、live／stored 列表與並行標題讀取、reference fail-closed、inspect provenance／截斷／redaction、signal 傳遞、送達與 handoff 封裝、UTF-8 訊息 byte 限制、loop guard（含 flush 失敗）、fallback 冷啟動去重與重試、controller 路徑，以及 local／hub 別名與 fail-closed 設定。原生 `session_list` 驗證 `status`，local `list_peers` 驗證 idle live session 仍為 `active: true`。
+- `test/index.test.mjs`：透過真正的 `apply()` 與註冊後的工具驗證生命週期／卸載、kill switch、live／stored 列表與並行標題讀取、reference fail-closed、inspect provenance／截斷／redaction／relay 精簡顯示、signal 傳遞、送達與 handoff 封裝、UTF-8 訊息 byte 限制、與 v0.2.1 相同的預設行為（`host` scope 跨 workspace 讀寫、loop guard 預設關閉）、選用 scope 與無效 scope 收緊、loop guard（含 flush 失敗）、fallback 冷啟動去重與重試、controller 路徑（含 DSH 的 `{ items }` 列表形狀），以及 local／hub 別名與 fail-closed 設定。原生 `session_list` 驗證 `status`，local `list_peers` 驗證 idle live session 仍為 `active: true`。
 - `test/refs.test.mjs`：citation 抽取、dotted lookalike fail-closed、完整 id／前綴／ambiguous／missing 匹配、最短前綴與 canonical UUID 驗證。
-- `test/hapi-hub.test.mjs`：對 mock hub 驗證 auth（含 401 重認證一次）、list 排序與排除自己、inspect（前綴解析、message 正規化與截斷、ambiguous／not_found）、ping（resume／active／多代 Pi readiness／409 retry／self guard），以及取消、timeout 與 HTTP／連線錯誤分類。訊息 byte 限制由 `index.js` 的工具執行，對應測試在 `test/index.test.mjs`。
-- `test/config.test.mjs`：環境旗標、訊息預算、auto／local／hub 模式與 kill switch。
-- `test/policy.test.mjs`：scope／allowCwds、訊息封裝與本文轉義、每對 session 的 loop guard 與時間窗。
+- `test/hapi-hub.test.mjs`：對 mock hub 驗證 auth（含 401 重認證一次、共用交換不受其他呼叫端取消影響）、list 排序與排除自己、inspect（前綴解析、message 正規化與截斷、ambiguous／not_found）、ping（resume／active／多代 Pi readiness／resume 次數上限／409 retry／self guard／`beforeDelivery`），以及取消、timeout 與 HTTP／連線錯誤分類。訊息 byte 限制由 `index.js` 的工具執行，對應測試在 `test/index.test.mjs`。
+- `test/config.test.mjs`：環境旗標、訊息預算、auto／local／hub 模式（`CLI_API_TOKEN` 單獨即可選 hub）與 kill switch。
+- `test/policy.test.mjs`：scope 預設與無效值、allowCwds、訊息封裝、本文轉義與 relay 精簡顯示、loop guard 預設關閉、每對 session 的計數與時間窗。
 
 測試支援檔案放在 `test-support/`，不放在 `test/`，避免 Node 把支援用的 `.js`／`.mjs` 當作測試檔案；也不加入套件發佈的 `files` allowlist。
 
@@ -33,11 +33,11 @@ npm test
 
 在**隔離的 DSH instance** 上跑（獨立 `DSH_HOME`、loopback 專用 port、不動主要 DSH service）。詳細的測試床架構、安全規則與踩過的坑見 [`e2e/README.md`](../e2e/README.md) 與 [`e2e/testbed-notes.md`](../e2e/testbed-notes.md)。
 
-`discovery` 刻意讓 A 在 `$TEST_BASE/workspace`、B 在其 `login-page-<token>` 子目錄；安裝後需在隔離 profile 的 `session-bridge` row 設 `scope: host`，再重啟。也可保留 `same-cwd`，以 `allowCwds` 放行測試 workspace 的實際絕對路徑。其他本機 phase 使用相同 cwd，遠端 `hapi` 不受本機 scope 影響；產品預設仍是 `same-cwd`。
+`discovery` 刻意讓 A 在 `$TEST_BASE/workspace`、B 在其 `login-page-<token>` 子目錄；預設 `host` scope 不需要額外設定。若在隔離 profile 選用 `scope: same-cwd`，`discovery` 預期會被拒絕（inspect `redacted:true`、送達被拒，harness 會印出 scope 提示），其他本機 phase 使用相同 cwd，仍應通過；遠端 `hapi` 不受本機 scope 影響。
 
 ### Phase 與驗證內容
 
-共八個 phase，以下結果是既有測試床的驗證紀錄。
+共八個 phase。下表的結果欄是以真實模型在 DSH 0.2.0-rc.2 上的紀錄；v0.2.2 的驗證見[驗證矩陣](#驗證矩陣)。
 
 | Phase | 驗證內容 | 結果 |
 | --- | --- | --- |
@@ -53,13 +53,17 @@ npm test
 ### 怎麼跑
 
 ```sh
-# 1. 起隔離 instance（DSH_BIN 未設定時從 PATH 找 dsh）
+# 0.（選用）沒有模型憑證時，用 mock model 代替：之後啟動的 instance 都會打它
 export TEST_BASE=$HOME/session-bridge-test
+mkdir -p "$TEST_BASE/logs"
+node e2e/mock-llm.mjs 4011 "$TEST_BASE/logs/mock-llm.log" &
+export DEEPSEEK_BASE_URL=http://127.0.0.1:4011 DEEPSEEK_API_KEY=sk-mock
+
+# 1. 起隔離 instance（DSH_BIN 未設定時從 PATH 找 dsh）
 ./e2e/start-test-instance.sh
 
-# 2. 裝 plugin；在隔離 profile 的 session-bridge row 設 config: {scope: host}
+# 2. 裝 plugin，重啟讓 bundle 生效
 ./e2e/install-plugin-bundle.sh /abs/path/to/dsh-session-bridge
-# 合併設定後重啟，讓 bundle 與 discovery 的 scope 設定生效
 ./e2e/stop-test-instance.sh && ./e2e/start-test-instance.sh
 
 # 3. 依序跑 phase
@@ -80,12 +84,14 @@ rm -rf "$TEST_BASE"
 
 `hapi` phase 需要可達的 HAPI hub、hub token 環境變數、以及自己建的拋棄式 HAPI `dsh` session（`HAPI_TEST_SESSION_ID`）；細節見 [`e2e/README.md`](../e2e/README.md)。需要瀏覽器 token 的 stock DSH 安裝用 `DSH_WEB_COOKIE` 傳 session cookie。
 
-E2E 會真的呼叫模型，每個 roundtrip 約 0.3–0.7k tokens；prompt 保持短。
+使用真實模型時，每個 roundtrip 約 0.3–0.7k tokens；prompt 保持短。`e2e/mock-llm.mjs` 依每個請求最新的指令回傳對應的工具呼叫與最後文字，不呼叫模型；它只驗證 plugin 與 DSH host 的機制，`discovery` 在 mock 模式下通過不代表模型會自己選對工具。
 
 ## 驗證矩陣
 
 | 項目 | 環境 | 結果 |
 | --- | --- | --- |
+| v0.2.2 E2E：`probe`、`discovery`、`inspect`、`dialogue`、`handoff`、`cold-prepare`、`cold`（`e2e/mock-llm.mjs` 代替模型；`hapi` 未重跑） | 全新 `DSH_HOME`，npm 上的 DSH 0.2.1-rc.2（`latest`）web profile，以 `dsh plugin add file:` 安裝，預設設定 | 全部 PASS；跨 workspace 的 `discovery` 不需設定；重啟後 `session_list` 列出 stored session，冷 session 由 session controller 喚醒 |
+| v0.2.2 選用 `scope: same-cwd` | 同上環境，profile row 設 `scope: same-cwd` | `discovery`（跨 workspace）如預期被拒：inspect `redacted:true`、送達拒絕；`dialogue`、`cold` PASS |
 | 全套 E2E（八個 phase + 冷啟動重啟） | 隔離 DSH 0.2.0-rc.2 + 本機 loopback HAPI hub 0.30.7 | 全部 PASS |
 | 自然語言 discovery（無工具名／id 提示） | 隔離 DSH 0.2.0-rc.2 測試床（與上列同一套安裝） | PASS（`session_list`→`session_inspect`→`session_send`，B 收到 `[session-bridge]` relay） |
 | 從 GitHub `github:…#v0.2.0` 安裝 + `probe` | 全新 `DSH_HOME`、stock DSH 0.2.1-rc.2 CLI | PASS（`session_list` 工具可用） |

@@ -6,16 +6,16 @@
 
 裝好之後，profile 的 `cordis.patch.yml`（或任何較高優先的 patch 層）可以覆寫這個 row：
 
+所有欄位都是選用的；不設定時的行為和 v0.2.1 相同。下面是一個開啟選用限制的例子：
+
 ```yaml
 - id: session-bridge
   config:
     enabled: true
     maxMessageBytes: 65536
-    scope: same-cwd
+    scope: same-cwd        # 預設 host
     allowCwds: []
-    loopGuard:
-      windowMs: 60000
-      maxMessages: 10
+    loopGuard: true        # 預設 false；也可給 {windowMs, maxMessages}
     hapiCompat: auto
     hapiHub:
       apiUrl: http://127.0.0.1:3006
@@ -26,17 +26,17 @@
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | `false` 時完全不註冊工具（含 system prompt 段）。 |
 | `maxMessageBytes` | integer | `65536` | `session_send`／`session_handoff`／local 與 hub `ping_peer` 的單則訊息 byte 上限，換行與中文都算 UTF-8 bytes。 |
-| `scope` | `same-cwd` \| `same-root` \| `host` | `same-cwd` | 本機對話讀取與送達範圍；`same-cwd` 要求相同工作目錄，`same-root` 另允許互為祖先／子目錄，`host` 允許同 host 的 ordinary sessions。無效值使用 `same-cwd`。 |
-| `allowCwds` | string[] | `[]` | 額外允許的目標工作目錄及其子目錄。展開開頭的 `~/`，再以 `path.resolve()` 轉為絕對路徑；相對路徑以 host process 的 cwd 為準，無效項目忽略。 |
-| `loopGuard` | `false` \| object | `{ windowMs: 60000, maxMessages: 10 }` | 每組有方向性的 sender → target，在滑動時間窗內最多送出的訊息數；`false` 關閉限制。 |
+| `scope` | `host` \| `same-root` \| `same-cwd` | `host` | 本機對話讀取與送達範圍。`host`（預設，同 v0.2.1）允許同 host 的所有 ordinary session；`same-cwd` 要求相同工作目錄；`same-root` 另允許互為祖先／子目錄。無法辨識的值會印 warning 並使用 `same-cwd`，打錯字不會放寬範圍。 |
+| `allowCwds` | string[] | `[]` | 搭配 `same-cwd`／`same-root`：額外允許的目標工作目錄及其子目錄。展開開頭的 `~/`，再以 `path.resolve()` 轉為絕對路徑；相對路徑以 host process 的 cwd 為準，無效項目忽略。 |
+| `loopGuard` | `false` \| `true` \| object | `false` | 每組有方向性的 sender → target，在滑動時間窗內最多送出的訊息數。預設關閉（同 v0.2.1）；`true` 等於 `{ windowMs: 60000, maxMessages: 10 }`。 |
 | `hapiCompat` | `auto` \| `local` \| `hub` \| `false` \| `none` | `auto` | HAPI 同名工具要接到哪裡；見 [HAPI 相容](hapi.md)。 |
 | `hapiHub` | object | — | hub client 設定；存在這個區塊時，`auto` 會選擇 hub。欄位見下。 |
 
-`auto` 只有在存在 `hapiHub` 區塊，或 `HAPI_API_URL` 與 `CLI_API_TOKEN` 都非空白時才選擇 hub；單獨設定其中一個環境變數仍使用 local。hub client 建立失敗時，`auto` 會印 warning 並退回 local 別名；明確設定 `hapiCompat: hub` 則印 warning 並停用三個 HAPI 同名工具，保留原生 `session_*` 工具。
+`auto` 在存在 `hapiHub` 區塊，或 `CLI_API_TOKEN` 非空白時選擇 hub（同 v0.2.1；`HAPI_API_URL` 可省略，預設 `http://127.0.0.1:3006`），否則使用 local。hub client 建立失敗時，`auto` 會印 warning 並退回 local 別名；明確設定 `hapiCompat: hub` 則印 warning 並停用三個 HAPI 同名工具，保留原生 `session_*` 工具。
 
-本機範圍以正規化後的目錄路徑比較；`same-root` 不代表尋找 Git root，同層的兄弟目錄不會因此互通。`allowCwds` 只放行指定目標目錄及其子目錄，`/work/proj2` 不屬於 `/work/proj`。除了 `host` 模式，雙方都必須有可驗證的 cwd；缺少 cwd 時，即使有 allowlist 也不會盲目 resume。超出範圍的 `session_inspect`／local `inspect_peer` 保留 metadata，回 `messages: []`、`truncated: false` 與 `redacted: true`；`session_send`／`session_handoff`／local `ping_peer` 則直接拒絕且不 resume。遠端 HAPI hub 目標不套用本機 cwd 範圍。
+選用 `same-cwd`／`same-root` 時，本機範圍以正規化後的目錄路徑比較；`same-root` 不代表尋找 Git root，同層的兄弟目錄不會因此互通。`allowCwds` 只放行指定目標目錄及其子目錄，`/work/proj2` 不屬於 `/work/proj`。這兩種模式下雙方都必須有可驗證的 cwd；缺少 cwd 時，即使有 allowlist 也不會盲目 resume（沒有 session controller 的 deployment 事先拿不到冷 session 的 cwd，所以在這兩種模式下無法喚醒冷 session）。超出範圍的 `session_inspect`／local `inspect_peer` 保留 metadata，回 `messages: []`、`truncated: false` 與 `redacted: true`；`session_send`／`session_handoff`／local `ping_peer` 則直接拒絕且不 resume。遠端 HAPI hub 目標不套用本機 cwd 範圍。
 
-`loopGuard.windowMs` 與 `loopGuard.maxMessages` 各自接受正的 safe integer，無效值分別使用 60000 毫秒與 10 則。原生工具及本機別名共用配對計數，hub `ping_peer` 也受限制；反向回覆是另一組配對。計數僅存在這次 plugin 啟用的記憶體中，重新啟動後歸零。
+開啟 `loopGuard` 時，`windowMs` 與 `maxMessages` 各自接受正的 safe integer，無效值分別使用 60000 毫秒與 10 則。原生工具及本機別名共用配對計數；hub `ping_peer` 以解析後的 session id 計數，同一目標的不同前綴寫法共用額度；反向回覆是另一組配對。計數僅存在這次 plugin 啟用的記憶體中，重新啟動後歸零。
 
 `hapiHub` 欄位（全部可選，憑證可改用環境變數）：
 
@@ -54,8 +54,8 @@
 | 變數 | 作用 |
 | --- | --- |
 | `DSH_SESSION_BRIDGE_DISABLE` | 全域 kill switch，優先於 row config；僅字串值去除前後空白並轉小寫後為 `1`／`true`／`yes` 時啟用，其他值不啟用。 |
-| `HAPI_API_URL` | hub URL（`hapiCompat` 為 `hub`／`auto` 時）。 |
-| `CLI_API_TOKEN` | HAPI CLI access token；**建議用這個而不是把 token 寫進 YAML**。 |
+| `HAPI_API_URL` | hub URL（hub 模式時使用；未設定時為 `http://127.0.0.1:3006`）。 |
+| `CLI_API_TOKEN` | HAPI CLI access token；非空白時 `auto` 會選擇 hub。**建議用這個而不是把 token 寫進 YAML**。 |
 | `HAPI_EXTRA_HEADERS_JSON` | JSON 物件，附加到每個 hub 請求。 |
 | `HAPI_SESSION_ID` | 由 `hapi dsh` 啟動時 HAPI 會 export；plugin 用它排除自己並提供回覆位址。 |
 | `HAPI_DISABLE_PEER_TOOLS` | HAPI 原生 kill switch；`1`／`true`／`yes` 時不註冊同名相容工具，忽略前後空白與大小寫（跟 HAPI 行為一致）。 |

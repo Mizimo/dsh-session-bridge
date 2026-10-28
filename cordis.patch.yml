@@ -8,17 +8,21 @@
 #   enabled: true|false        host-local kill switch; DSH_SESSION_BRIDGE_DISABLE wins
 #                              when 1/true/yes (trimmed, case-insensitive)
 #   maxMessageBytes: 65536     byte budget for send/handoff and local/hub ping bodies
-#   scope: 'same-cwd'|'same-root'|'host'
-#                              default same-cwd; same-root also allows ancestors and
-#                              descendants, host allows all ordinary local sessions
+#   scope: 'host'|'same-root'|'same-cwd'
+#                              default host: every ordinary local session, as in v0.2.1;
+#                              same-cwd/same-root opt into a workspace boundary (same-root
+#                              also allows ancestors and descendants); an unknown value
+#                              warns and uses same-cwd
 #                              out-of-scope: inspect redacts; delivery refuses before resume
-#   allowCwds: []              extra target directories and descendants; expands ~/
-#                              and resolves paths relative to the host process cwd
-#   loopGuard: {windowMs: 60000, maxMessages: 10}  per-sender/target sliding-window limit
-#                              set false to disable; shared by native tools and aliases
+#   allowCwds: []              with same-cwd/same-root: extra target directories and
+#                              descendants; expands ~/ and resolves paths relative to the
+#                              host process cwd
+#   loopGuard: false           off by default (v0.2.1 had no limit); true = at most 10
+#                              messages per sender -> target in 60s, or set
+#                              {windowMs, maxMessages}; shared by native tools and aliases
 #   hapiCompat: 'auto'|'local'|'hub'|false|'none'
-#                              auto = hub with hapiHub or non-empty HAPI_API_URL +
-#                              CLI_API_TOKEN, else local aliases over DSH sessions
+#                              auto = hub with hapiHub or a non-empty CLI_API_TOKEN
+#                              (HAPI_API_URL optional), else local aliases over DSH sessions
 #                              client build failure: auto warns and falls back to local;
 #                              explicit hub warns and disables HAPI aliases (fail closed),
 #                              keeping native session_* tools

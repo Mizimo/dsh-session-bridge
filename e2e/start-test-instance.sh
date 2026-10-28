@@ -43,10 +43,17 @@ install -m 755 "$SCRIPT_DIR/stop-test-instance.sh" "$BASE/bin/stop-test-instance
 # 2. Credentials for the isolated home: an owner-only COPY of the real provider
 #    credentials, so the test instance never writes into ~/.dsh and the real
 #    instance never reads anything from here. (The file contents are never printed.)
+#    With DEEPSEEK_BASE_URL set (e.g. e2e/mock-llm.mjs), the exported
+#    DEEPSEEK_API_KEY is enough and no credentials are copied.
 if [ ! -f "$BASE/home/.credentials.yaml" ]; then
-  [ -f "$HOME/.dsh/.credentials.yaml" ] || die "no source credentials at ~/.dsh/.credentials.yaml"
-  install -m 600 "$HOME/.dsh/.credentials.yaml" "$BASE/home/.credentials.yaml"
-  info "copied provider credentials into isolated home (mode 600)"
+  if [ -f "$HOME/.dsh/.credentials.yaml" ]; then
+    install -m 600 "$HOME/.dsh/.credentials.yaml" "$BASE/home/.credentials.yaml"
+    info "copied provider credentials into isolated home (mode 600)"
+  elif [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
+    info "no provider credentials copied; model requests go to DEEPSEEK_BASE_URL=$DEEPSEEK_BASE_URL"
+  else
+    die "no source credentials at ~/.dsh/.credentials.yaml (or set DEEPSEEK_BASE_URL for a mock model)"
+  fi
 fi
 
 # 3. Auto-initialize the isolated 'web' profile from the shipped template

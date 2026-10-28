@@ -42,32 +42,34 @@ test('environment helpers default to process.env', () => {
   }
 })
 
-test('auto compatibility stays local without a hub block or complete environment pair', () => {
+test('auto compatibility stays local without a hub block or CLI_API_TOKEN', () => {
   for (const config of [undefined, null, {}, { hapiCompat: 'auto' }]) {
     assert.deepEqual(compatibilityOf(config, {}), { mode: 'local' })
   }
   for (const env of [
-    { CLI_API_TOKEN: 'secret-token' },
     { HAPI_API_URL: 'http://hub.test' },
-    { HAPI_API_URL: ' \t', CLI_API_TOKEN: 'secret-token' },
     { HAPI_API_URL: 'http://hub.test', CLI_API_TOKEN: '\n ' },
-    { HAPI_API_URL: true, CLI_API_TOKEN: 'secret-token' },
     { HAPI_API_URL: 'http://hub.test', CLI_API_TOKEN: 1 },
   ]) {
     assert.deepEqual(compatibilityOf({}, env), { mode: 'local' })
   }
 })
 
-test('auto compatibility chooses hub for a block or complete environment pair', () => {
+test('auto compatibility chooses hub for a block or a CLI_API_TOKEN alone, as v0.2.1 did', () => {
   for (const hub of [{}, { apiUrl: 'http://hub.test', accessToken: 'secret-token' }]) {
     const result = compatibilityOf({ hapiHub: hub }, {})
     assert.deepEqual(result, { mode: 'hub', hub, explicit: false })
     assert.equal(result.hub, hub)
   }
-  assert.deepEqual(compatibilityOf({ hapiCompat: 'auto' }, {
-    HAPI_API_URL: ' http://hub.test ',
-    CLI_API_TOKEN: ' secret-token ',
-  }), { mode: 'hub', hub: {}, explicit: false })
+  // The hub URL is optional: the client falls back to the default HAPI address.
+  for (const env of [
+    { CLI_API_TOKEN: 'secret-token' },
+    { HAPI_API_URL: ' \t', CLI_API_TOKEN: 'secret-token' },
+    { HAPI_API_URL: true, CLI_API_TOKEN: 'secret-token' },
+    { HAPI_API_URL: ' http://hub.test ', CLI_API_TOKEN: ' secret-token ' },
+  ]) {
+    assert.deepEqual(compatibilityOf({ hapiCompat: 'auto' }, env), { mode: 'hub', hub: {}, explicit: false })
+  }
 })
 
 test('only an object block counts as configured hapiHub', () => {

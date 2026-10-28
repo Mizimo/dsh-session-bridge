@@ -259,7 +259,7 @@ async function phaseDiscovery() {
         || /"redacted"\s*:\s*true/.test(result.text)))
     if (!blocked) return
     scopeHintShown = true
-    log('DISCOVERY: scope/permission restriction detected. A and B intentionally use different workspaces; set scope: host on the isolated session-bridge profile row (or allowCwds covering TEST_BASE/workspace), restart the instance, and rerun discovery.')
+    log('DISCOVERY: scope/permission restriction detected. A and B intentionally use different workspaces; this phase needs the default scope: host. Remove the same-cwd/same-root scope from the isolated session-bridge profile row (or add allowCwds covering TEST_BASE/workspace), restart the instance, and rerun discovery.')
   }
   const discovered = await waitFor(async () => {
     const page = await pageOf(a)

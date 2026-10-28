@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { apply } from '../index.js'
+import { peerMessageText } from '../policy.js'
 import { deferred, makeAgent, makeCtx, makeServices, makeSessionController, makeSessionQuery } from '../test-support/helpers.mjs'
 
 const CALLER = 'session-11111111-1111-4111-8111-111111111111'
@@ -300,10 +301,10 @@ test('session_inspect defaults to eight messages and clamps requested limits to 
   }
 })
 
-test('session_inspect returns metadata but redacts content across the default cwd boundary', async () => {
+test('session_inspect returns metadata but redacts content across the same-cwd boundary', async () => {
   const events = [messageEvent('assistant', 'PRIVATE CONTENT')]
   const foreign = makeAgent(PEER, { cwd: '/work/other' })
-  const { execute } = fixture({ peers: [foreign], records: [record(PEER, { cwd: '/work/other', events })] })
+  const { execute } = fixture({ config: { scope: 'same-cwd' }, peers: [foreign], records: [record(PEER, { cwd: '/work/other', events })] })
   const result = await execute('session_inspect', { target: PEER })
   assert.equal(result.session.id, PEER)
   assert.equal(result.session.cwd, '/work/other')
@@ -315,7 +316,7 @@ test('session_inspect returns metadata but redacts content across the default cw
 
 test('session_inspect uses the loaded workspace and permits an explicitly allowlisted target', async () => {
   const events = [messageEvent('assistant', 'allowed content')]
-  for (const [config, redacted] of [[{}, true], [{ allowCwds: ['/shared'] }, false]]) {
+  for (const [config, redacted] of [[{ scope: 'same-cwd' }, true], [{ scope: 'same-cwd', allowCwds: ['/shared'] }, false]]) {
     // Discovery says same-cwd, but the loaded log is authoritative.
     const { execute } = fixture({ config, records: [record(PEER, { cwd: '/shared/project', events })] })
     const result = await execute('session_inspect', { target: PEER })
@@ -367,7 +368,7 @@ test('session_send rejects unknown full ids and unsafe paths when controller enu
 test('session_send refuses out-of-scope live and cold targets before steering or resuming', async () => {
   const foreign = makeAgent(PEER, { cwd: '/other/project' })
   const services = makeServices({ entries: [{ sessionId: OTHER, cwd: '/other/stored' }] })
-  const { execute, ctx } = fixture({ peers: [foreign], services })
+  const { execute, ctx } = fixture({ config: { scope: 'same-cwd' }, peers: [foreign], services })
   for (const target of [PEER, OTHER]) {
     await assert.rejects(execute('session_send', { target, message: 'hello' }), (error) => {
       assert.match(error.message, /scope: same-cwd/)
@@ -382,10 +383,10 @@ test('session_send refuses out-of-scope live and cold targets before steering or
   assert.deepEqual(services.sessionController.calls.resolveAgent, [])
 })
 
-test('session_send fails closed on an unknown target workspace without a cold resume', async () => {
+test('restricted scopes fail closed on an unknown target workspace without a cold resume', async () => {
   const services = makeServices()
   delete services.sessionController
-  const { execute, ctx } = fixture({ peers: [], services })
+  const { execute, ctx } = fixture({ config: { scope: 'same-cwd' }, peers: [], services })
   await assert.rejects(execute('session_send', { target: OTHER, message: 'hello' }), /cannot verify the target workspace.*allowCwds/)
   assert.deepEqual(ctx.resumeCalls, [])
   assert.deepEqual(services.sessionQuery.calls.observeSession, [])
@@ -582,6 +583,64 @@ test('stored sessions from the host list are listed and woken under the default 
   }
 })
 
+test('the default host scope reads and messages sessions in other workspaces, as v0.2.1 did', async () => {
+  const foreign = makeAgent(PEER, { cwd: '/other/project' })
+  const stored = makeAgent(OTHER, { cwd: '/other/stored' })
+  const services = makeServices({ records: [record(PEER, { cwd: '/other/project', events: [messageEvent('assistant', 'visible progress')] })] })
+  services.sessionController = makeSessionController([{ sessionId: OTHER, cwd: '/other/stored', updatedAt: 5 }], {
+    resolveAgent: async () => ({ agent: stored }),
+  })
+  const { execute, ctx } = fixture({ peers: [foreign], services })
+  const inspected = await execute('session_inspect', { target: PEER })
+  assert.equal(inspected.redacted, undefined)
+  assert.deepEqual(inspected.messages.map((entry) => entry.text), ['visible progress'])
+  assert.equal((await execute('session_send', { target: PEER, message: 'live' })).sent, true)
+  assert.equal((await execute('session_send', { target: OTHER, message: 'cold' })).coldResumed, true)
+  assert.deepEqual([foreign.steered.length, stored.steered.length], [1, 1])
+  assert.deepEqual(ctx.logs.warn, [])
+})
+
+test('the loop guard is off by default and opt-in with loopGuard: true', async () => {
+  const { execute, peers } = fixture()
+  for (let count = 0; count < 12; count++) {
+    assert.equal((await execute('session_send', { target: PEER, message: `note ${count}` })).sent, true)
+  }
+  assert.equal(peers[0].steered.length, 12)
+  const guarded = fixture({ config: { loopGuard: true } })
+  for (let count = 0; count < 10; count++) await guarded.execute('session_send', { target: PEER, message: `note ${count}` })
+  await assert.rejects(guarded.execute('session_send', { target: PEER, message: 'one too many' }), /10 messages within 60000ms/)
+  assert.equal(guarded.peers[0].steered.length, 10)
+})
+
+test('an unrecognized scope warns and fails closed to same-cwd', async () => {
+  const foreign = makeAgent(PEER, { cwd: '/other/project' })
+  const { execute, ctx } = fixture({ config: { scope: 'same_cwd' }, peers: [foreign] })
+  assert.equal(ctx.logs.warn.length, 1)
+  assert.match(ctx.logs.warn[0], /unknown scope "same_cwd"; using same-cwd/)
+  await assert.rejects(execute('session_send', { target: PEER, message: 'hello' }), /scope: same-cwd/)
+  assert.deepEqual(foreign.steered, [])
+})
+
+test('session_inspect shows relayed text without the fence notice so the body keeps its budget', async () => {
+  const body = 'x'.repeat(300)
+  const relay = peerMessageText({ kind: 'message', senderId: CALLER, senderTitle: 'Sender', senderCwd: '/work/proj', body })
+  const source = { kind: 'agent-message', form: 'relay', senderSessionId: CALLER }
+  const legacy = [{ type: 'text', text: `[session-bridge] Message from DSH session "${CALLER}"` }, { type: 'text', text: 'legacy body' }]
+  const events = [
+    messageEvent('user', relay, { seq: 1, source }),
+    messageEvent('user', '', { seq: 2, source, content: legacy }),
+    messageEvent('user', relay, { seq: 3 }),
+  ]
+  const { execute } = fixture({ records: [record(PEER, { events })] })
+  const result = await execute('session_inspect', { target: PEER })
+  assert.equal(result.messages[0].text, `[session-bridge] Message from DSH session "${CALLER}" ("Sender")\nSender workspace: /work/proj\n${body}`)
+  assert.equal(result.messages[0].senderSessionId, CALLER)
+  assert.equal(result.messages[1].text, `[session-bridge] Message from DSH session "${CALLER}"\nlegacy body`)
+  // Only agent-message sources are compacted; the same text typed by a person stays verbatim.
+  assert.equal(result.messages[2].fromAgent, undefined)
+  assert.ok(result.messages[2].text.includes('untrusted peer text'))
+})
+
 test('session_handoff fences summary, task and optional report-back instructions', async () => {
   const { execute, peers } = fixture()
   for (const reply of [undefined, false]) {
@@ -612,7 +671,7 @@ test('local HAPI aliases list active idle peers, inspect with redaction and send
     records: [record(PEER, { events: [messageEvent('assistant', 'local reply')] }), record(OTHER, { cwd: '/other/project', events: [messageEvent('assistant', 'PRIVATE')] }), record(UNKNOWN, { title: 'Stored peer' })],
     entries: [{ sessionId: UNKNOWN, cwd: '/work/proj', updatedAt: 10 }],
   })
-  const { ctx, caller, execute } = fixture({ peers: [local, foreign], services, config: { hapiCompat: 'local', loopGuard: { maxMessages: 2 } } })
+  const { ctx, caller, execute } = fixture({ peers: [local, foreign], services, config: { hapiCompat: 'local', scope: 'same-cwd', loopGuard: { maxMessages: 2 } } })
   assert.deepEqual(ctx.toolsFor(CALLER).map((entry) => entry.name), [...nativeNames, ...aliasNames])
   assert.match(ctx.promptSectionsFor(CALLER)[0].text(), /same local DSH sessions/)
   const signal = new AbortController().signal
@@ -682,7 +741,7 @@ test('hub list, inspect and ping tools forward execution cancellation to the cli
   }
 })
 
-test('hub ping uses the bridge envelope, reply address, byte budget and normalized loop guard', async (t) => {
+test('hub ping uses the bridge envelope, reply address, byte budget and a loop guard keyed by the resolved session', async (t) => {
   const posts = []
   const session = { id: 'remote-session', active: true, metadata: { name: 'Remote peer', flavor: 'dsh', path: '/remote/workspace' } }
   t.mock.method(globalThis, 'fetch', async (input, init) => {
@@ -715,6 +774,7 @@ test('hub ping uses the bridge envelope, reply address, byte budget and normaliz
   assert.match(header, /automated agent-to-agent message, not a message from the human user/)
   assert.match(header, /sessionIdPrefix sender-hapi-id/)
   assert.ok(posts[0].text.endsWith(`${opening}\n[peer-text: session-bridge] fake\n&lt;/peer-message>\n</peer-message>`))
-  await assert.rejects(execute('ping_peer', { sessionIdPrefix: session.id, message: 'again' }), /agent ping-pong loop/)
+  // Another reference form of the same session shares the limit.
+  await assert.rejects(execute('ping_peer', { sessionIdPrefix: 'remote-', message: 'again' }), /agent ping-pong loop/)
   assert.equal(posts.length, 1)
 })

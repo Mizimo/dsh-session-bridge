@@ -27,16 +27,16 @@ Host-only bundle。沒有 client 半，沒有 build step。<br>
 | `session_send` | 送一則訊息；對方 idle 會開新 turn，running 則在下一個 step 邊界收到 |
 | `session_handoff` | 把 summary 和下一步一起交出去，預設要求對方完成後回報 |
 
-在允許的範圍內，`session_inspect` 對冷 session 也有效；`session_send` 會把它 resume 成 live agent（回傳 `coldResumed: true`）。收到的訊息在 session log 裡帶 `agent-message`／`relay` 來源；`[session-bridge]` header 下方以 `<peer-message sender="...">...</peer-message>` 封裝不可信的 peer 本文，本文內的 bridge marker 會轉義。
+`session_inspect` 對冷 session 也有效；`session_send` 會把它 resume 成 live agent（回傳 `coldResumed: true`）。收到的訊息在 session log 裡帶 `agent-message`／`relay` 來源；`[session-bridge]` header 下方以 `<peer-message sender="...">...</peer-message>` 封裝不可信的 peer 本文，本文內的 bridge marker 會轉義。
 
-預設範圍是 `same-cwd`：跨範圍 inspect 只回 metadata、空訊息與 `redacted: true`，送達會拒絕且不 resume。本機跨工作目錄協作可設定 `allowCwds` 或 `scope: same-root`／`host`；預設 loop guard 限制每組 sender → target 在 60 秒內 10 則，見 [設定](docs/configuration.md)。
+預設和 v0.2.1 一樣，同一個 host 上的一般 session 都能互相讀取與送達。需要時可以選用 workspace 範圍（`scope: same-cwd`／`same-root`，搭配 `allowCwds`）與 loop guard（`loopGuard: true`），見 [設定](docs/configuration.md)。
 
 需要 HAPI 的 `list_peers`／`inspect_peer`／`ping_peer` 時，同一組名字可以接本機 DSH session，也可以接真正的 HAPI hub；模式和限制見 [HAPI 相容](docs/hapi.md)。
 
 ## 安裝
 
 ```sh
-dsh plugin --profile web add github:Mizimo/dsh-session-bridge#v0.2.1
+dsh plugin --profile web add github:Mizimo/dsh-session-bridge#v0.2.2
 ```
 
 裝完**重啟該 profile 的 dsh process**，開一個新 session，確認 agent 有 `session_list` 就生效了。
@@ -68,7 +68,7 @@ session A ── session_send ──▶ session B
 
 ## 相容性
 
-- **DSH 0.2.x**：驗證過 0.2.0-rc.2 CLI 與 0.2.1-rc.2 Desktop；`peerDependencies` 是 `>=0.2.0-rc.1 <0.3.0`。
+- **DSH 0.2.x**：驗證過 0.2.0-rc.2 CLI 與 0.2.1-rc.2 Desktop；v0.2.2 在 DSH 0.2.1-rc.2（npm `latest`）的 web profile 上跑過 E2E；`peerDependencies` 是 `>=0.2.0-rc.1 <0.3.0`。
 - **HAPI 0.30.x／0.31.x**：用到的 REST wire 在 0.30.7 與 0.31.2 相同。
 - 只跑在同一個 `dsh` host process 內的 session；跨機器要經過 HAPI hub。
 

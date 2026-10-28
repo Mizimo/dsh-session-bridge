@@ -32,7 +32,7 @@
 
 本機工具只接受 ordinary session，排除 subagent／teammate child。已知候選的精確 id 匹配優先，不受前綴最短 8 碼限制。完整列舉成功後找不到目標就回錯誤；列舉服務不可用時，只允許完整 `session-<uuid>` 或裸 UUID 繼續查詢／冷啟動，裸 UUID 會補上 `session-`。過短前綴或路徑字串不能代替 session id；可先用 `session_list` 選擇目標。
 
-預設 `scope: same-cwd`，本機對話讀取與送達僅限相同工作目錄。可用 `allowCwds` 放行特定目標目錄及其子目錄，或改成 `same-root`／`host`，詳見 [設定](configuration.md)。列表仍提供 peer metadata；跨範圍 inspect 回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`。`session_send`、`session_handoff` 及本機 `ping_peer` 拒絕跨範圍送達，且不會 resume 目標；非 `host` 模式也拒絕無法確認 cwd 的目標。遠端 hub 工具不套用本機 cwd 範圍。
+預設 `scope: host`，和 v0.2.1 一樣可以讀取與送達同 host 的所有 ordinary session。選用 `same-cwd`／`same-root`（可搭配 `allowCwds`）時，本機對話讀取與送達會限制在允許的工作目錄，詳見 [設定](configuration.md)。這時列表仍提供 peer metadata；跨範圍 inspect 回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`。`session_send`、`session_handoff` 及本機 `ping_peer` 拒絕跨範圍送達，且不會 resume 目標；也會拒絕無法確認 cwd 的目標。遠端 hub 工具不套用本機 cwd 範圍。
 
 ## `session_list`
 
@@ -84,9 +84,9 @@
 ```
 
 - **唯讀**：只是 replay session log，不會 resume、不會 steer、不消耗對方 token。
-- 超出設定範圍，或在非 `host` 模式下無法驗證工作目錄時，只回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`；本機 `inspect_peer` 也會回傳 `redacted`。
+- 選用 `same-cwd`／`same-root` 而目標超出範圍或無法驗證工作目錄時，只回 metadata 與 `messages: []`、`truncated: false`、`redacted: true`；本機 `inspect_peer` 也會回傳 `redacted`。
 - 只取 user／assistant 角色的最近訊息；單則截到 600 字、總量 16 KiB、tool call 只保留名稱；被截斷時 `truncated: true`。
-- `fromAgent: true` 表示那則 user message 的 `source.kind = 'agent-message'`；來源有非空白字串 `senderSessionId` 時會原樣保留，方便辨識發送者。
+- `fromAgent: true` 表示那則 user message 的 `source.kind = 'agent-message'`；來源有非空白字串 `senderSessionId` 時會原樣保留，方便辨識發送者。這類 relay 只顯示 bridge header 與本文（仍是轉義後的文字），省略 notice 與 `<peer-message>` 標籤，讓 600 字的額度留給訊息內容。
 - 冷 session 也讀得到（`live: false`、`persisted: true`），且讀完仍然是冷的。
 
 ## `session_send`
@@ -106,7 +106,7 @@
 
 - 對方 `idle` 會開新 turn；`running` 會在下一個 step 邊界收到。
 - 目標是 stored session 時會先 resume，成功後 `coldResumed: true`。
-- 送達前先檢查 workspace 範圍與 loop guard；任何一項拒絕時都不會喚醒目標。
+- 選用的 workspace 範圍與 loop guard 在送達前檢查；任何一項拒絕時都不會喚醒目標。
 - 訊息大小超過 `maxMessageBytes` 會直接報錯，不會截斷。
 - 來源標記見 [來源標記](#來源標記)。
 
@@ -139,7 +139,7 @@
 
 - 同一個 `dsh` host process 內的 session 才互通；跨機器／跨 process 要靠 HAPI hub（唯一的跨機器路徑）。
 - 一次只有一個目標，沒有廣播。
-- 送達會喚醒對方、消耗 token；預設 loop guard 對每組 sender → target 限制 60 秒內 10 則，減少 agent ping-pong。可調整 `loopGuard.windowMs`／`loopGuard.maxMessages` 或用 `loopGuard: false` 關閉；它是記憶體中的每對限流，仍需在任務指示裡約定停止條件。
+- 送達會喚醒對方、消耗 token；互相回話可能無限 ping-pong。和 v0.2.1 一樣預設**沒有次數上限**，請在任務指示裡約定停止條件。需要時可用 `loopGuard: true` 對每組 sender → target 限制 60 秒內 10 則，或用 `loopGuard.windowMs`／`loopGuard.maxMessages` 調整；它是記憶體中的每對限流。
 - `session_inspect` 不是完整 transcript；需要完整內容請直接讀 session log。
 - 對冷 session 送訊息會把它 resume 成 live agent；失敗會回報錯誤，不會弄壞 session。跟 GUI 同時開同一個 session 由 session-controller 去重。
 - `flush` 只保證已提交的 session events 落盤；剛 steer 進 inbox 的訊息要等對方 driver 取用才進 log，process 在那一瞬間 crash 仍有小窗口會丟訊息。

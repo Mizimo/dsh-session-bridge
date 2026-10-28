@@ -27,11 +27,11 @@ export TEST_BASE=$HOME/session-bridge-test
 export TEST_PORT=3099 DSH_BIN=/abs/path/to/dsh
 ./e2e/start-test-instance.sh            # 建立隔離 home、複製 credentials（mode 600）、起 web
 ./e2e/install-plugin-bundle.sh /abs/path/to/dsh-session-bridge
-# 在隔離 profile 的 session-bridge row 設 scope: host（discovery 會跨 workspace）
 ./e2e/stop-test-instance.sh && ./e2e/start-test-instance.sh   # bundle 清單只在啟動時讀
 ```
 
-- 需要有 provider 憑證：隔離 home 尚無憑證時，腳本從主 `~/.dsh/.credentials.yaml` 複製一份；來源也不存在時會報錯停止。
+- 需要有 provider 憑證：隔離 home 尚無憑證時，腳本從主 `~/.dsh/.credentials.yaml` 複製一份；來源不存在且沒有設定 `DEEPSEEK_BASE_URL`（mock model，見 `e2e/README.md`）時會報錯停止。
+- DSH 的 DeepSeek provider 打 `<DEEPSEEK_BASE_URL>/v1/messages`（Anthropic Messages SSE），`DEEPSEEK_API_KEY` 可放任意值；`e2e/mock-llm.mjs` 就是用這個入口代替模型。
 - `start-test-instance.sh` 不修改 PATH；pid 檔是 `$TEST_BASE/test-instance.pid`，port 檔是 `$TEST_BASE/test-instance.port`，log 是 `$TEST_BASE/logs/test-instance.log`。它會把 stop 腳本複製到 `$TEST_BASE/bin/stop-test-instance.sh` 並設為可執行。未設定 `DSH_BIN` 時從 PATH 找 `dsh`，找不到或不可執行時需明確設定 `DSH_BIN`。
 - 同機多個測試床就用不同 `TEST_BASE` + 不同 `TEST_PORT`；不同機器可直接搬（腳本只依賴 `DSH_BIN`、`TEST_BASE`、`TEST_PORT`）。
 
@@ -62,11 +62,11 @@ Event 形狀（`session/page` 的 messages / `sessionQuery.readSession` 的 even
 
 ## 5. HAPI 相容層測試床
 
-隔離 profile 先為本機 `discovery` 設定 `config: {scope: host}`：A 使用 `$TEST_BASE/workspace`，B 使用其 `login-page-<token>` 子目錄，預設 `same-cwd` 會隱藏 inspect 本文並拒絕送達。若只想放行測試 workspace，可改用 `allowCwds: [<TEST_BASE 的實際絕對路徑>/workspace]`；YAML 不會自動展開 `$TEST_BASE`。其他本機 phase 使用相同 cwd，遠端 hub 目標不受此 scope 限制。
+本機 `discovery` 的 A 使用 `$TEST_BASE/workspace`，B 使用其 `login-page-<token>` 子目錄；預設 `host` scope 下不需設定。若選用 `scope: same-cwd`，它會隱藏 inspect 本文並拒絕送達；只想放行測試 workspace 時可加 `allowCwds: [<TEST_BASE 的實際絕對路徑>/workspace]`（YAML 不會自動展開 `$TEST_BASE`）。其他本機 phase 使用相同 cwd，遠端 hub 目標不受 scope 限制。
 
 - 測試機上有既有的 HAPI hub（`@twsxtd/hapi` 0.30.x，通常 loopback）；`GET /api/sessions` 未帶 token 應回 401。
 - Token 從 HAPI 自己的設定讀（例如 `~/.hapi/settings.json` 的 `cliApiToken`）：**只放到環境變數或 mode-600 env 檔**，不要寫進 YAML、log、commit。
-- 同時跑 `hapi` 時，DSH instance 以 hub 模式載入：profile row `config: {scope: host, hapiCompat: hub, hapiHub: {apiUrl: 'http://127.0.0.1:<hub port>'}}`；`CLI_API_TOKEN` 由啟動腳本帶入 host process。
+- 同時跑 `hapi` 時，DSH instance 以 hub 模式載入：profile row `config: {hapiCompat: hub, hapiHub: {apiUrl: 'http://127.0.0.1:<hub port>'}}`；`CLI_API_TOKEN` 由啟動腳本帶入 host process。
 - 送訊息對象**必須是自己建的拋棄式 HAPI `dsh` session**，不要對其他人的 HAPI session 送訊息或讀訊息。
 - HAPI `dsh` provider（0.30.x）會 spawn 名為 `dsh-acp-demo` 的 binary；沒有的話在 workspace 放一個 shim 指向 `dsh --profile acp` 即可：
   `#!/bin/sh` + `exec npx dsh --profile acp`。這是 HAPI 側的設定，不是 plugin 需求。

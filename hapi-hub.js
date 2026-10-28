@@ -39,6 +39,8 @@ const MAX_MESSAGE_LIMIT = 100
 const DEFAULT_MESSAGE_LIMIT = 30
 const MAX_SNIPPET_CHARS = 1_200
 const MAX_LABEL_CHARS = 255
+/** Resumes one ping may trigger: the first plus three for a target that keeps dropping. */
+const MAX_RESUMES_PER_PING = 4
 
 /** Typed hub failure, extending HAPI's `PingPeerErrorCode` for connectivity. */
 export class HapiHubError extends Error {
@@ -146,6 +148,17 @@ function sleep(ms, signal) {
   })
 }
 
+/** Wait for a shared promise until it settles or this caller's own signal aborts. */
+function unlessCancelled(promise, signal) {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(new HapiHubError('disabled', 'hub request cancelled'))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new HapiHubError('disabled', 'hub request cancelled'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
 /**
  * Build one hub client. Throws `bad_args` when no hub URL or access token can
  * be resolved, so the plugin can fall back to local HAPI-compatible aliases.
@@ -197,42 +210,49 @@ export function createHapiHubClient(config = {}) {
     return new HapiHubError('unavailable', `hub connection failed (${detail}${cause}). URL: ${url}.`)
   }
 
-  /** Exchange the access token for a hub JWT (single flight). */
-  async function authenticate(force = false, signal) {
-    if (!force && typeof jwt === 'string') return jwt
-    if (authInFlight !== undefined) return authInFlight
-    authInFlight = (async () => {
-      const url = `${apiUrl}/api/auth`
-      let response
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: { ...extraHeaders, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ accessToken }),
-          signal: requestSignal(signal, AUTH_TIMEOUT_MS),
-        })
-      } catch (error) {
-        if (signal?.aborted === true) throw new HapiHubError('disabled', 'hub request cancelled')
-        if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-          throw new HapiHubError('timeout', `hub auth timed out after ${AUTH_TIMEOUT_MS}ms. Hub URL: ${apiUrl}.`)
-        }
-        throw connectionFailure(error, url)
-      }
-      checkResponseStatus(response, url)
-      const data = await response.json().catch(() => null)
-      const token = typeof data?.token === 'string' ? data.token : ''
-      if (!response.ok || token === '') {
-        const detail = typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`
-        throw new HapiHubError('auth_failed', `failed to exchange access token for JWT (${detail}). Hub URL: ${apiUrl}.`)
-      }
-      jwt = token
-      return token
-    })()
+  /** Exchange the access token for a hub JWT on the exchange's own timeout. */
+  async function exchangeToken() {
+    const url = `${apiUrl}/api/auth`
+    let response
     try {
-      return await authInFlight
-    } finally {
-      authInFlight = undefined
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { ...extraHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessToken }),
+        signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
+      })
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new HapiHubError('timeout', `hub auth timed out after ${AUTH_TIMEOUT_MS}ms. Hub URL: ${apiUrl}.`)
+      }
+      throw connectionFailure(error, url)
     }
+    checkResponseStatus(response, url)
+    const data = await response.json().catch(() => null)
+    const token = typeof data?.token === 'string' ? data.token : ''
+    if (!response.ok || token === '') {
+      const detail = typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`
+      throw new HapiHubError('auth_failed', `failed to exchange access token for JWT (${detail}). Hub URL: ${apiUrl}.`)
+    }
+    jwt = token
+    return token
+  }
+
+  /**
+   * Hub JWT, from cache or one exchange shared by every concurrent caller
+   * (sessions share this client). A caller's signal ends only its own wait,
+   * never the exchange other callers are waiting on.
+   */
+  async function authenticate(force = false, signal) {
+    if (signal?.aborted === true) throw new HapiHubError('disabled', 'hub request cancelled')
+    if (!force && typeof jwt === 'string') return jwt
+    if (authInFlight === undefined) {
+      const exchange = exchangeToken()
+      authInFlight = exchange
+      const settle = () => { if (authInFlight === exchange) authInFlight = undefined }
+      exchange.then(settle, settle)
+    }
+    return await unlessCancelled(authInFlight, signal)
   }
 
   /** One authenticated hub request with a single re-auth retry. */
@@ -414,19 +434,28 @@ export function createHapiHubClient(config = {}) {
       }
     },
 
-    /** Resume if needed, wait for active, then deliver one message. */
-    async pingPeer({ sessionIdPrefix, message, signal } = {}) {
+    /**
+     * Resume if needed, wait for active, then deliver one message.
+     * `beforeDelivery(sessionId)` runs once the target is resolved and before
+     * any resume or send; throwing from it stops the ping.
+     */
+    async pingPeer({ sessionIdPrefix, message, signal, beforeDelivery } = {}) {
       const body = typeof message === 'string' ? message : ''
       if (body.trim() === '') throw new HapiHubError('bad_args', 'message is required')
       const { summary } = await resolveSession(sessionIdPrefix, signal)
       const sessionId = String(summary.id)
       if (sessionId === selfSessionId) throw new HapiHubError('bad_args', 'ping_peer cannot target the calling session itself')
+      await beforeDelivery?.(sessionId)
       let resumeCount = 0
 
       /** Ensure the session is active, resuming it when necessary. */
       async function ensureActive() {
         let current = await getSessionSummary(sessionId, signal)
         if (current?.active === true) return current
+        // A Pi target that drops after every readiness wait would otherwise be resumed forever.
+        if (resumeCount >= MAX_RESUMES_PER_PING) {
+          throw new HapiHubError('resume_failed', `session went inactive again after ${resumeCount} resumes; not resuming it again`)
+        }
         const resumeResult = await request(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
           method: 'POST',
           body: {},

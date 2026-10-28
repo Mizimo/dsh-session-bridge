@@ -48,11 +48,11 @@ loopGuard.note(caller.id, targetId)
 await ctx.get('sessions')?.flush?.(target.session)
 ```
 
-- `apply()` 建立共用的 scope 與 loop guard，傳入各 agent 的工具。`deliver()` 以解析候選的 cwd 檢查範圍，並檢查配對次數；這兩步都在取得／resume 目標 agent 之前，未知 workspace 在非 `host` 模式下直接拒絕。
+- `apply()` 建立共用的 scope 與 loop guard，傳入各 agent 的工具；預設 `host` scope 與關閉的 loop guard 不做任何檢查（同 v0.2.1）。選用限制時，`deliver()` 以解析候選的 cwd 檢查範圍，並檢查配對次數；這兩步都在取得／resume 目標 agent 之前，未知 workspace 在非 `host` 模式下直接拒絕。
 - `peerMessageText()` 把 bridge header、workspace 與 notice 放在標籤上方，peer 本文放在 `<peer-message>` 內；本文中的封裝標籤與 `[session-bridge]` 會轉義，不能冒充 bridge header。hub 同樣使用這個封裝，額外 header 提供自動訊息來源與回覆位址。
 - 跟 DSH 內建 Agent Teams 同一條 durable 通道；`steer` 在 idle 時會啟動新 turn，running 時在下一個 step 邊界插入。
 - `flush` 只保證「已提交的 session events」落盤，用來讓 sender 在回報成功前盡量收斂；剛進 inbox 的訊息要等 target driver 取用才進 log。
-- 本機在 steer 接受訊息後立即記錄配對時間，flush 失敗也不會略過計數；hub 則在送出成功後記錄。local 以完整目標 id 計數，hub 以正規化的目標參照字串計數；檢查時清除超過時間窗的紀錄。
+- 開啟 loop guard 時，本機在 steer 接受訊息後立即記錄配對時間，flush 失敗也不會略過計數；hub 則在送出成功後記錄。兩者都以解析後的完整目標 id 計數（hub 透過 `pingPeer` 的 `beforeDelivery` 在 resume 前檢查）；檢查時清除超過時間窗的紀錄。
 - 目標不在記憶體時先 resume（見下），成功後回 `coldResumed: true`。
 
 ## 讀取
@@ -60,7 +60,7 @@ await ctx.get('sessions')?.flush?.(target.session)
 - `sessionQuery.readSession(id)` 對 log 做完整 replay（DSH 0.2.x 不接受 signal，plugin 多傳的 signal 會被忽略），**不會**把 session 變成 live；`persisted` 沿用解析候選的 metadata，不再重複列舉完整 corpus，缺值時回 `false`。
 - 以載入 header 的 cwd（缺少時使用解析候選的 cwd）檢查 scope；超出範圍時只回正常 metadata、空 messages、`truncated: false` 與 `redacted: true`，不抽取對話文字。
 - 逐 event 抽 `user/message` → `data.content`、`assistant/message` → `data.message.content`、`session/title` → `data.title`；tool call 只留名稱。
-- `user/message` 的來源在 `data.source`；`kind = 'agent-message'` 的訊息標 `fromAgent: true` 並保留 `senderSessionId` 供工具回傳。
+- `user/message` 的來源在 `data.source`；`kind = 'agent-message'` 的訊息標 `fromAgent: true` 並保留 `senderSessionId` 供工具回傳。這類訊息以 `compactPeerMessageText()` 去掉 notice 與 `<peer-message>` 標籤，只留 bridge header 與（轉義後的）本文，再套用字數上限。
 - 單則 600 字、總量 16 KiB、預設 8 則（上限 30）；截斷時 `truncated: true`。
 
 ## 冷啟動
@@ -84,18 +84,18 @@ fallback 以 host context 與 session id 共用執行中的 Promise，並行送�
 
 ## HAPI hub client
 
-- `auto` 在有 `hapiHub` 區塊或 `HAPI_API_URL` + `CLI_API_TOKEN` 都非空白時才選 hub。建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`。建立失敗會印 warning：`auto` 退回 local 別名；明確指定 hub 則停用 HAPI 別名，保留原生工具。
-- `POST /api/auth` 換 JWT，single-flight 快取；任何請求遇到 401 會重認證一次再重試。
+- `auto` 在有 `hapiHub` 區塊或 `CLI_API_TOKEN` 非空白時選 hub（同 v0.2.1）。建 client 時解析 `apiUrl`／`accessToken`／`extraHeaders`／`selfSessionId`，缺 token 直接丟 `bad_args`。建立失敗會印 warning：`auto` 退回 local 別名；明確指定 hub 則停用 HAPI 別名，保留原生工具。
+- `POST /api/auth` 換 JWT，single-flight 快取；任何請求遇到 401 會重認證一次再重試。交換本身只受自己的 10 秒 timeout 限制；各呼叫端以自己的 signal 結束等待，不會因為別的 session 取消而失敗。
 - 每次呼叫有 timeout（一般 20s、auth 10s、resume／send 30s）；`TimeoutError` 對應 `timeout`、呼叫端取消對應 `disabled`。
 - `inspect_peer` 先用 list 解析前綴，再 `GET /:id` 取最新 metadata，最後讀 messages——不 resume。
-- `ping_peer` 解析目標後先確保 active：必要時 `POST /resume` → 輪詢 active（2s／最多 60s）；pi flavor 另外等 `metadata.piSessionId`。送訊息用穩定 `localId`；409 `session_inactive` 會重新確認後重送一次。
+- `ping_peer` 解析目標後先確保 active：必要時 `POST /resume` → 輪詢 active（2s／最多 60s）；pi flavor 另外等 `metadata.piSessionId`。同一次 ping 最多 resume 4 次，之後回 `resume_failed`。送訊息用穩定 `localId`；409 `session_inactive` 會重新確認後重送一次。
 - 所有 hub 錯誤轉成有型別的 `HapiHubError`；連線失敗或 HTTP 5xx 是 `unavailable`，401／403 或認證交換失敗是 `auth_failed`，另有 `not_found`／`ambiguous`／`timeout` 等可操作訊息。
 
 ## 設計取捨與失敗窗口
 
-- **預設 same-cwd**：本機對話內容與送達限制在相同工作目錄；可用 `allowCwds` 放行指定目標及子目錄，或選擇 `same-root`／`host`。遠端 hub 不套用本機 cwd 範圍。
+- **預設行為同 v0.2.1**：預設 `host` scope、不限次數；`same-cwd`／`same-root`（可搭配 `allowCwds`）與 loop guard 都是選用的。無法辨識的 `scope` 值會收緊成 `same-cwd`，不會因打錯字放寬。遠端 hub 不套用本機 cwd 範圍。
 - **header 與本文分界**：bridge 撰寫的來源說明放在標籤外，peer 本文轉義並明示不可信；封裝不會把 peer 指令變成人類授權。
-- **每對 loop guard**：一次一個目標，預設每組 sender → target 在 60 秒內最多 10 則；各工具共用記憶體計數，可配置或關閉，重啟後歸零。
+- **選用的每對 loop guard**：一次一個目標；開啟後預設每組 sender → target 在 60 秒內最多 10 則，各工具共用記憶體計數，重啟後歸零。它是速率限制，不是對話輪數上限：回合較慢的 ping-pong 仍可能低於門檻，所以任務指示裡仍要約定停止條件。
 - **flush 不是完整 durability**：steer 被接受後、target driver 取用前，process crash 仍有小窗口會丟訊息；要完全避免需要在 host 端改 delivery 語意。
 - **HAPI 單向**：DSH 不是 hub 上的 session，除非跑在 `hapi dsh` 底下，否則回覆只能用 `inspect_peer` 讀。
 - **prefer host 路徑**：冷啟動優先用 `sessionController.resolveAgent`，只有在 host 沒提供時才走可攜 fallback；兩條路徑都不會直接改 session 檔案。
@@ -106,4 +106,4 @@ fallback 以 host context 與 session id 共用執行中的 Promise，並行送�
 
 `agents.roots/resume/get`、`agent.status`、`sessionController.list/resolveAgent`、`sessionQuery.readSession/listSessions/readTitle/observeSession`、`agentPresets.resolve/mount`、`agentDefaultModel.currentSelection`、`sessionTitle.get`、`sessions.flush`、`createUserMessage`、`defineTool`、`agent/created`／`agent/disposed`。
 
-目標 runtime 是 DSH 0.2.x（`peerDependencies: >=0.2.0-rc.1 <0.3.0`）；用到的 API 在 0.2.0-rc.2 與 0.2.1-rc.2 都驗證過。
+目標 runtime 是 DSH 0.2.x（`peerDependencies: >=0.2.0-rc.1 <0.3.0`）；用到的 API 在 0.2.0-rc.2 與 0.2.1-rc.2 都驗證過，`sessionController.list()` 的 `{ items }` 形狀在 0.2.0-rc.2 到 0.2.2-alpha.2 的型別定義中相同。

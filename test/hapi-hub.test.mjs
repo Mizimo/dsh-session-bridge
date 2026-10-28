@@ -272,6 +272,36 @@ test('pingPeer repeats the Pi readiness guard across several resumes', async () 
   assert.equal(state.sends[0].polls, 3)
 })
 
+test('pingPeer stops resuming a Pi session that keeps dropping after readiness', async () => {
+  const { state } = makeHub({
+    sessions: [{ id: 'pi-drop-1111', metadata: { flavor: 'pi' }, dropAfterPiReady: 100 }],
+  })
+  await assert.rejects(client().pingPeer({ sessionIdPrefix: 'pi-drop-', message: 'never lands' }), (error) => {
+    assert.ok(error instanceof HapiHubError)
+    assert.equal(error.code, 'resume_failed')
+    assert.match(error.message, /after 4 resumes/)
+    return true
+  })
+  assert.equal(state.resumes, 4)
+  assert.equal(state.sendAttempts.length, 0)
+})
+
+test('pingPeer runs beforeDelivery with the resolved id before any resume or send', async () => {
+  const { state } = makeHub({ sessions: [{ id: 'gate-1111', active: false }] })
+  const seen = []
+  await assert.rejects(client().pingPeer({
+    sessionIdPrefix: '/sessions/gate-1111',
+    message: 'blocked',
+    beforeDelivery: (sessionId) => {
+      seen.push(sessionId)
+      throw new Error('blocked by caller')
+    },
+  }), /blocked by caller/)
+  assert.deepEqual(seen, ['gate-1111'])
+  assert.equal(state.resumes, 0)
+  assert.equal(state.sendAttempts.length, 0)
+})
+
 test('pingPeer waits for Pi readiness after a 409 session_inactive resume', async () => {
   const { state } = makeHub({
     sessions: [{ id: 'pi-retry-1111', active: true, metadata: { flavor: 'pi', piSessionId: 'pi-original' }, piReadyPolls: [4] }],
@@ -379,6 +409,27 @@ test('caller cancellation also interrupts re-authentication', async () => {
     return hubFetch(input, init)
   }
   await assert.rejects(hub.listPeers({ signal: controller.signal }), (error) => error instanceof HapiHubError && error.code === 'disabled')
+})
+
+test('one caller cancelling a shared authentication does not fail the other callers', async () => {
+  const { state } = makeHub({ sessions: [{ id: 'shared-1111', active: true }] })
+  const hub = client()
+  const controller = new AbortController()
+  let release
+  const authGate = new Promise((resolve) => { release = resolve })
+  const hubFetch = globalThis.fetch
+  globalThis.fetch = async (input, init = {}) => {
+    if (new URL(String(input)).pathname === '/api/auth') await authGate
+    return hubFetch(input, init)
+  }
+  // Both calls wait on one token exchange; only the first caller cancels.
+  const cancelled = hub.listPeers({ signal: controller.signal })
+  const other = hub.listPeers()
+  controller.abort()
+  release()
+  await assert.rejects(cancelled, (error) => error instanceof HapiHubError && error.code === 'disabled')
+  assert.deepEqual((await other).map((peer) => peer.id), ['shared-1111'])
+  assert.equal(state.authCalls, 1)
 })
 
 test('connection failures include the failing URL and underlying error', async (t) => {

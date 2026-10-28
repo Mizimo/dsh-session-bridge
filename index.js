@@ -33,7 +33,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { compatibilityOf, disabledByEnv, messageBudgetOf } from './config.js'
 import { createHapiHubClient, HapiHubError } from './hapi-hub.js'
-import { createLoopGuard, cwdAllowed, normalizeScope, peerMessageText } from './policy.js'
+import { SCOPE_MODES, compactPeerMessageText, createLoopGuard, cwdAllowed, normalizeScope, peerMessageText } from './policy.js'
 import { isFullSessionId, matchSessionRef, normalizeSessionRef } from './refs.js'
 
 /** Cordis plugin name. */
@@ -377,7 +377,8 @@ function inspectMessages(events, limit) {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]
     if (event?.type !== 'user/message' && event?.type !== 'assistant/message') continue
-    const text = eventText(event)
+    const fromAgent = event.type === 'user/message' && event.data?.source?.kind === 'agent-message'
+    const text = fromAgent ? compactPeerMessageText(eventText(event)) : eventText(event)
     if (text === '') continue
     if (messages.length >= limit || bytes >= INSPECT_MAX_BYTES) {
       truncated = true
@@ -394,7 +395,7 @@ function inspectMessages(events, limit) {
       text: clipped,
     }
     if (typeof event.time === 'number') entry.time = event.time
-    if (event.type === 'user/message' && event.data?.source?.kind === 'agent-message') {
+    if (fromAgent) {
       entry.fromAgent = true
       const senderSessionId = event.data.source.senderSessionId
       if (typeof senderSessionId === 'string' && senderSessionId.trim() !== '') entry.senderSessionId = senderSessionId
@@ -1064,14 +1065,14 @@ function hubToolDefinitions(ctx, agent, options) {
           body,
           extraLines: [`This is an automated agent-to-agent message, not a message from the human user. ${replyLine}`],
         })
-        const targetKey = normalizeSessionRef(args.sessionIdPrefix)
-        loopGuard.check(agent.id, targetKey)
         const result = await client.pingPeer({
           sessionIdPrefix: args.sessionIdPrefix,
           message: prefixed,
           signal: exec?.signal,
+          // Count the resolved session, so every prefix or citation of one target shares a limit.
+          beforeDelivery: (sessionId) => loopGuard.check(agent.id, sessionId),
         })
-        loopGuard.note(agent.id, targetKey)
+        loopGuard.note(agent.id, result.sessionId)
         return {
           delivered: true,
           sessionId: result.sessionId,
@@ -1132,6 +1133,9 @@ export function apply(ctx, config = {}) {
   }
   const budget = messageBudgetOf(config)
   const scope = normalizeScope(config)
+  if (config?.scope !== undefined && config?.scope !== null && !SCOPE_MODES.includes(config.scope)) {
+    ctx.logger?.warn?.(`session-bridge: unknown scope ${JSON.stringify(config.scope)}; using same-cwd`)
+  }
   const loopGuard = createLoopGuard(config)
   let compat = compatibilityOf(config)
   let hubClient
