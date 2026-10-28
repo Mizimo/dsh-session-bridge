@@ -93,7 +93,10 @@ export function makeCtx({ roots = [], services = {}, agents = {} } = {}) {
   return ctx
 }
 
-/** In-memory session corpus with call/signal tracking and overridable I/O. */
+/**
+ * In-memory session corpus with call/signal tracking and overridable I/O.
+ * Return shapes follow DSH 0.2.x `@deepseek-ai/dsh-session-query`.
+ */
 export function makeSessionQuery(records = [], overrides = {}) {
   const calls = { readSession: [], listSessions: [], readTitle: [], observeSession: [] }
   const disposed = []
@@ -110,8 +113,8 @@ export function makeSessionQuery(records = [], overrides = {}) {
       if (overrides.readSession !== undefined) return await overrides.readSession(id, signal)
       signal?.throwIfAborted()
       const record = recordOf(id)
-      const header = { ...record.header }
-      return { session: { header, cwd: header.cwd, createdAt: header.createdAt }, events: record.events ?? [] }
+      // DSH returns the cloned header itself as `session`.
+      return { session: { ...record.header }, inheritedEventCount: 0, events: record.events ?? [] }
     },
     async listSessions(signal) {
       calls.listSessions.push({ signal })
@@ -125,10 +128,11 @@ export function makeSessionQuery(records = [], overrides = {}) {
       signal?.throwIfAborted()
       return { title: recordOf(id).title }
     },
-    async observeSession(id, signal) {
-      calls.observeSession.push({ id, signal })
-      if (overrides.observeSession !== undefined) return await overrides.observeSession(id, signal)
-      signal?.throwIfAborted()
+    // DSH signature: observeSession(sessionId, { signal, projectionMode }).
+    async observeSession(id, options = {}) {
+      calls.observeSession.push({ id, signal: options.signal })
+      if (overrides.observeSession !== undefined) return await overrides.observeSession(id, options)
+      options.signal?.throwIfAborted()
       const record = recordOf(id)
       return {
         header: { ...record.header },
@@ -148,7 +152,8 @@ export function makeSessionController(entries = [], overrides = {}) {
       calls.list.push({ request, signal })
       if (overrides.list !== undefined) return await overrides.list(request, signal)
       signal?.throwIfAborted()
-      return entries
+      // Same shape as DSH's SessionController.list(): { items: SessionSummary[] }.
+      return { items: entries }
     },
     async resolveAgent(id, signal) {
       calls.resolveAgent.push({ id, signal })

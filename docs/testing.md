@@ -25,7 +25,7 @@ npm test
 | `test-support/stubs/dsh-agent.mjs` | 提供空的 `installModelSelection()`。 |
 | `test-support/stubs/dsh-llm.mjs` | `createUserMessage()` 原樣回傳輸入，讓測試檢查 content 與 structured source。 |
 | `test-support/stubs/dsh-tools.mjs` | `defineTool()` 原樣回傳定義，測試直接執行註冊的 `execute()`。 |
-| `test-support/helpers.mjs` | fake host／agent、scoped registry 與 disposer、session query／controller／flush 等服務、呼叫與 signal 紀錄，以及控制並行順序的 Promise。 |
+| `test-support/helpers.mjs` | fake host／agent、scoped registry 與 disposer、session query／controller／flush 等服務、呼叫與 signal 紀錄，以及控制並行順序的 Promise。服務的參數與回傳形狀依 DSH 0.2.x 實際 API：`sessionController.list()` 回 `{ items }`、`readSession()` 的 `session` 就是 header、`observeSession(id, { signal })`。 |
 
 `index.js` 不需要為測試增加內部 exports。單元測試驗證插件接線與行為；真實 DSH driver、模型與落盤流程仍由 E2E 驗證。測試不連線到真 hub：`test/hapi-hub.test.mjs` 覆寫並恢復 `globalThis.fetch`；index 的 hub 測試也使用 fetch mock。環境變數與 mock 在測試結束後恢復。
 

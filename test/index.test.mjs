@@ -562,6 +562,26 @@ test('cold sends use sessionController.resolveAgent with the signal and leave de
   assert.equal(target.steered.length, 2)
 })
 
+test('stored sessions from the host list are listed and woken under the default scope', async () => {
+  // DSH's SessionController.list() resolves { items }; a bare array is still accepted.
+  for (const shape of [(rows) => ({ items: rows }), (rows) => rows]) {
+    const target = makeAgent(OTHER)
+    const services = makeServices({ records: [record(OTHER, { title: 'Stored peer' })] })
+    const rows = [{ sessionId: OTHER, agentAvailable: false, running: false, blank: false, updatedAt: 5, cwd: '/work/proj' }]
+    services.sessionController = makeSessionController([], {
+      list: async () => shape(rows),
+      resolveAgent: async () => ({ agent: target }),
+    })
+    const { execute } = fixture({ services })
+    const listed = await execute('session_list')
+    assert.deepEqual(listed.stored, [{ id: OTHER, updatedAt: 5, title: 'Stored peer', cwd: '/work/proj' }])
+    assert.equal(listed.storedTotal, 1)
+    const sent = await execute('session_send', { target: OTHER, message: 'wake up' })
+    assert.deepEqual(sent, { sent: true, target: { id: OTHER, status: 'idle' }, coldResumed: true })
+    assert.equal(target.steered.length, 1)
+  }
+})
+
 test('session_handoff fences summary, task and optional report-back instructions', async () => {
   const { execute, peers } = fixture()
   for (const reply of [undefined, false]) {

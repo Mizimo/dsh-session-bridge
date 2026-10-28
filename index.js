@@ -159,18 +159,27 @@ function listPeers(ctx, caller) {
     .map((agent) => describeSession(ctx, agent))
 }
 
+/**
+ * Rows of one `sessionController.list()` result. DSH resolves
+ * `{ items: SessionSummary[] }`; a bare array is accepted too.
+ */
+function controllerRows(listed) {
+  if (Array.isArray(listed)) return listed
+  return Array.isArray(listed?.items) ? listed.items : undefined
+}
+
 /** Stored (not running) ordinary sessions that session_send can wake. */
 async function listStoredPeers(ctx, caller, signal) {
   const controller = ctx.get('sessionController')
   if (typeof controller?.list !== 'function') return { items: [], total: 0 }
   let all
   try {
-    // Host signature: list(reservedRequest, signal); the request carries no fields.
-    all = await controller.list({}, signal)
+    // Host signature: list(reservedRequest, signal) resolves { items }; the request carries no fields.
+    all = controllerRows(await controller.list({}, signal))
   } catch {
     return { items: [], total: 0 }
   }
-  if (!Array.isArray(all)) return { items: [], total: 0 }
+  if (all === undefined) return { items: [], total: 0 }
   const cold = all
     .filter((entry) => entry.sessionId !== caller.id && entry.agentAvailable !== true && entry.origin !== 'subagent')
     .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
@@ -204,8 +213,8 @@ async function sessionRefCandidates(ctx, caller, options = {}) {
   const controller = ctx.get('sessionController')
   if (typeof controller?.list === 'function') {
     try {
-      const all = await controller.list({}, options.signal)
-      if (Array.isArray(all)) {
+      const all = controllerRows(await controller.list({}, options.signal))
+      if (all !== undefined) {
         if (options.allPersisted !== true) exhaustive = true
         for (const entry of all) {
           if (typeof entry?.sessionId !== 'string') continue
@@ -520,7 +529,7 @@ async function resumeStoredSession(ctx, sessionId, signal) {
   }
   let observation
   try {
-    observation = await sessionQuery.observeSession(sessionId, signal)
+    observation = await sessionQuery.observeSession(sessionId, { signal })
   } catch (error) {
     return { agent: undefined, cold: false, reason: `session is not live and its stored log could not be read (${String(error)})` }
   }

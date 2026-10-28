@@ -26,7 +26,7 @@
 ## 枚舉
 
 - live session：`ctx.agents.roots()`，排除自己與 subagent child；狀態用 `agent.status`，標題用 `sessionTitle.get()`，`updatedAt` 由 `snapshotEvents(seq-1, seq)` 取得。
-- stored session：`ctx.get('sessionController').list()` + `sessionQuery.readTitle()`，最多列 30 筆；標題並行讀取，輸出仍依最近活動排序，單筆標題讀取失敗不影響其他項目。
+- stored session：`ctx.get('sessionController').list()`（DSH 回傳 `{ items: SessionSummary[] }`，也接受陣列）+ `sessionQuery.readTitle()`，最多列 30 筆；標題並行讀取，輸出仍依最近活動排序，單筆標題讀取失敗不影響其他項目。
 - 兩者合併成 `session_list` 的 `sessions`／`stored`。
 
 ## 送達
@@ -57,7 +57,7 @@ await ctx.get('sessions')?.flush?.(target.session)
 
 ## 讀取
 
-- `sessionQuery.readSession(id, signal)` 對 log 做完整 replay，**不會**把 session 變成 live；`persisted` 沿用解析候選的 metadata，不再重複列舉完整 corpus，缺值時回 `false`。
+- `sessionQuery.readSession(id)` 對 log 做完整 replay（DSH 0.2.x 不接受 signal，plugin 多傳的 signal 會被忽略），**不會**把 session 變成 live；`persisted` 沿用解析候選的 metadata，不再重複列舉完整 corpus，缺值時回 `false`。
 - 以載入 header 的 cwd（缺少時使用解析候選的 cwd）檢查 scope；超出範圍時只回正常 metadata、空 messages、`truncated: false` 與 `redacted: true`，不抽取對話文字。
 - 逐 event 抽 `user/message` → `data.content`、`assistant/message` → `data.message.content`、`session/title` → `data.title`；tool call 只留名稱。
 - `user/message` 的來源在 `data.source`；`kind = 'agent-message'` 的訊息標 `fromAgent: true` 並保留 `senderSessionId` 供工具回傳。
@@ -65,11 +65,11 @@ await ctx.get('sessions')?.flush?.(target.session)
 
 ## 冷啟動
 
-目標 session 存在但不在記憶體時，優先走 web bundle 的 `ctx.get('sessionController').resolveAgent(sessionId, signal)`——這是 GUI 開 session 的同一條路徑，preset、模型選擇、去重都交給 host。
+目標 session 存在但不在記憶體時，優先走 web bundle 的 `ctx.get('sessionController').resolveAgent(sessionId)`（DSH 0.2.x 只收 session id）——這是 GUI 開 session 的同一條路徑，preset、模型選擇、去重都交給 host。
 
 沒有 session-controller 的 deployment 才用可攜 fallback：
 
-1. `sessionQuery.observeSession(id, signal)` 讀 header；
+1. `sessionQuery.observeSession(id, { signal })` 讀 header；
 2. `agentPresets.resolve(...)` 找 preset；
 3. `ctx.agents.resume({ resumeSessionId, agentOptions, setup })`，`setup` 內用 `installModelSelection`（0.2.0 是 `(agentCtx, selection)`、較新版本是單參數；fallback 用 `{ current: selection }` 呼叫，兩版都相容）＋ `preset.mount`。
 
