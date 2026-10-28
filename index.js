@@ -31,20 +31,16 @@
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { compatibilityOf, disabledByEnv, messageBudgetOf } from './config.js'
 import { createHapiHubClient, HapiHubError } from './hapi-hub.js'
-import { normalizeSessionRef } from './refs.js'
+import { createLoopGuard, cwdAllowed, normalizeScope, peerMessageText } from './policy.js'
+import { isFullSessionId, matchSessionRef, normalizeSessionRef } from './refs.js'
 
 /** Cordis plugin name. */
 export const name = 'session-bridge'
 
 /** Services required by the plugin; optional capabilities are read with ctx.get(). */
 export const inject = ['agents', 'tools', 'systemPrompt']
-
-/** Prefix that marks a bridge-delivered message in the target model's view. */
-const MARKER = '[session-bridge]'
-
-/** Default cap for one message body, matching DSH's own agent-message budget. */
-const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024
 
 /** How many stored (not running) sessions session_list surfaces as wakeable targets. */
 const STORED_SESSION_LIMIT = 30
@@ -55,8 +51,8 @@ const INSPECT_MAX_MESSAGE_LIMIT = 30
 const INSPECT_MESSAGE_CHARS = 600
 const INSPECT_MAX_BYTES = 16 * 1024
 
-/** Env kill switch, mirroring HAPI's `HAPI_DISABLE_PEER_TOOLS`. */
-const DISABLE_ENV = 'DSH_SESSION_BRIDGE_DISABLE'
+/** In-flight fallback resumes, isolated by host context and session id. */
+const fallbackResumes = new WeakMap()
 
 /**
  * Guidance installed into every session agent that may use the bridge.
@@ -114,57 +110,6 @@ function byteLength(text) {
   return Buffer.byteLength(text, 'utf8')
 }
 
-/** Normalize a positive byte budget from row config. */
-function messageBudgetOf(config) {
-  const configured = config?.maxMessageBytes
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_MESSAGE_BYTES
-}
-
-/** True when the environment kill switch is on. */
-function disabledByEnv() {
-  try {
-    const raw = process.env?.[DISABLE_ENV]
-    return raw === '1' || raw === 'true'
-  } catch {
-    return false
-  }
-}
-
-/** HAPI's own peer-tool kill switch; when set, HAPI would not expose peers. */
-const HAPI_PEER_DISABLE_ENV = 'HAPI_DISABLE_PEER_TOOLS'
-function hapiPeerToolsDisabledByEnv() {
-  try {
-    const raw = process.env?.[HAPI_PEER_DISABLE_ENV]
-    // Same truthiness as HAPI 0.31.2 (peerTools.ts): only true/1/yes count.
-    return typeof raw === 'string' && ['1', 'true', 'yes'].includes(raw.trim().toLowerCase())
-  } catch {
-    return false
-  }
-}
-
-/**
- * Resolve the optional HAPI compatibility surface:
- * `local` aliases or real hub tools. `auto` picks hub when credentials exist.
- */
-function compatibilityOf(config) {
-  // HAPI disables its peer tools when HAPI_DISABLE_PEER_TOOLS is set; a DSH
-  // session spawned by such a HAPI should not expose the HAPI-named aliases.
-  if (hapiPeerToolsDisabledByEnv()) return null
-  const hub = config?.hapiHub
-  const configuredHub = hub !== null && typeof hub === 'object'
-  // Credentials may also come from the HAPI environment, so `hub` mode needs
-  // only an explicit hapiHub block (or the env pair) here; the client validates
-  // the final apiUrl/accessToken and the plugin falls back to local aliases.
-  // HAPI never mirrors CLI_API_TOKEN into wrapped agents, but when a user
-  // does export it the default hub URL applies, so a token alone is enough.
-  const envHub = typeof process.env?.CLI_API_TOKEN === 'string' && process.env.CLI_API_TOKEN.trim() !== ''
-  const requested = config?.hapiCompat
-  if (requested === false || requested === 'none') return null
-  if (requested === 'hub') return configuredHub || envHub ? { mode: 'hub', hub: hub ?? {} } : null
-  if (requested === 'local') return { mode: 'local' }
-  return configuredHub || envHub ? { mode: 'hub', hub: hub ?? {} } : { mode: 'local' }
-}
-
 /** Read one session's folded title without failing the caller. */
 function titleOf(ctx, agent) {
   try {
@@ -214,24 +159,32 @@ function listPeers(ctx, caller) {
     .map((agent) => describeSession(ctx, agent))
 }
 
+/**
+ * Rows of one `sessionController.list()` result. DSH resolves
+ * `{ items: SessionSummary[] }`; a bare array is accepted too.
+ */
+function controllerRows(listed) {
+  if (Array.isArray(listed)) return listed
+  return Array.isArray(listed?.items) ? listed.items : undefined
+}
+
 /** Stored (not running) ordinary sessions that session_send can wake. */
 async function listStoredPeers(ctx, caller, signal) {
   const controller = ctx.get('sessionController')
   if (typeof controller?.list !== 'function') return { items: [], total: 0 }
   let all
   try {
-    // Host signature: list(reservedRequest, signal); the request carries no fields.
-    all = await controller.list({}, signal)
+    // Host signature: list(reservedRequest, signal) resolves { items }; the request carries no fields.
+    all = controllerRows(await controller.list({}, signal))
   } catch {
     return { items: [], total: 0 }
   }
-  if (!Array.isArray(all)) return { items: [], total: 0 }
+  if (all === undefined) return { items: [], total: 0 }
   const cold = all
     .filter((entry) => entry.sessionId !== caller.id && entry.agentAvailable !== true && entry.origin !== 'subagent')
     .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
   const query = ctx.get('sessionQuery')
-  const items = []
-  for (const entry of cold.slice(0, STORED_SESSION_LIMIT)) {
+  const items = await Promise.all(cold.slice(0, STORED_SESSION_LIMIT).map(async (entry) => {
     let title
     try {
       title = (await query?.readTitle?.(entry.sessionId, signal))?.title
@@ -241,35 +194,43 @@ async function listStoredPeers(ctx, caller, signal) {
     const item = { id: entry.sessionId, updatedAt: entry.updatedAt ?? 0 }
     if (title !== undefined) item.title = title
     if (entry.cwd !== undefined) item.cwd = entry.cwd
-    items.push(item)
-  }
+    return item
+  }))
   return { items, total: cold.length }
 }
 
 // ── Session references: ids, unique prefixes, /sessions/<id> citations ─────
 
-/** Known session ids this deployment can resolve, live first. */
+/** Known ordinary sessions, live first, and whether stored discovery succeeded. */
 async function sessionRefCandidates(ctx, caller, options = {}) {
   const candidates = new Map()
+  let exhaustive = false
   for (const agent of ctx.agents.roots()) {
-    if (agent.session.header.origin === 'subagent') continue
-    candidates.set(agent.id, { id: agent.id, live: true })
+    const header = agent.session.header
+    if (header.origin === 'subagent') continue
+    candidates.set(agent.id, { id: agent.id, live: true, cwd: header.cwd, origin: header.origin })
   }
   const controller = ctx.get('sessionController')
   if (typeof controller?.list === 'function') {
     try {
-      const all = await controller.list({}, options.signal)
-      if (Array.isArray(all)) {
+      const all = controllerRows(await controller.list({}, options.signal))
+      if (all !== undefined) {
+        if (options.allPersisted !== true) exhaustive = true
         for (const entry of all) {
           if (typeof entry?.sessionId !== 'string') continue
           if (entry.origin === 'subagent') continue
-          if (!candidates.has(entry.sessionId)) {
-            candidates.set(entry.sessionId, { id: entry.sessionId, live: entry.agentAvailable === true })
-          }
+          const existing = candidates.get(entry.sessionId)
+          candidates.set(entry.sessionId, {
+            id: entry.sessionId,
+            live: existing?.live === true || entry.agentAvailable === true,
+            cwd: existing?.cwd ?? entry.cwd,
+            persisted: entry.persisted,
+            origin: existing?.origin ?? entry.origin,
+          })
         }
       }
     } catch {
-      // A broken controller listing only narrows discovery; resolution below still works.
+      // Without a complete listing, only canonical full ids may pass through.
     }
   }
   if (options.allPersisted === true) {
@@ -277,53 +238,73 @@ async function sessionRefCandidates(ctx, caller, options = {}) {
     if (typeof query?.listSessions === 'function') {
       try {
         const records = await query.listSessions(options.signal)
-        for (const record of records ?? []) {
-          const id = record?.header?.id
-          if (typeof id === 'string' && !candidates.has(id)) {
-            candidates.set(id, { id, live: record.live === true })
+        if (Array.isArray(records)) {
+          exhaustive = true
+          for (const record of records) {
+            const header = record?.header
+            const id = header?.id
+            if (typeof id !== 'string' || header.origin === 'subagent') continue
+            const existing = candidates.get(id)
+            candidates.set(id, {
+              id,
+              live: existing?.live === true || record.live === true,
+              cwd: existing?.cwd ?? header.cwd,
+              persisted: record.persisted ?? existing?.persisted,
+              origin: existing?.origin ?? header.origin,
+            })
           }
         }
       } catch {
-        // Same as above: an unreadable corpus must not mask an exact id.
+        // Live roots and controller rows do not exhaust the persisted corpus.
       }
     }
   }
   if (options.excludeCaller === true && caller !== undefined) candidates.delete(caller.id)
-  return [...candidates.values()]
+  return { candidates: [...candidates.values()], exhaustive }
 }
 
 /**
- * Resolve one user/model supplied session reference to a full session id.
- * Exact ids win; a unique prefix is accepted; ambiguous prefixes fail with a
- * sample of matches. When nothing matches the reference passes through so the
- * caller can report the precise reachability error.
+ * Resolve a reference and retain its discovery metadata. Exact ids win; local
+ * prefixes need eight variable characters. A missing canonical id may pass
+ * through only when the deployment could not enumerate the relevant corpus.
  */
-async function resolveSessionRef(ctx, caller, rawRef, options = {}) {
+async function resolveSessionRefInfo(ctx, caller, rawRef, options = {}) {
   const normalized = normalizeSessionRef(rawRef)
   if (normalized === '') {
     throw new Error('target must be a session id, a unique id prefix, or a string containing one /sessions/<id> citation')
   }
-  const candidates = await sessionRefCandidates(ctx, caller, options)
-  /** Unique match for one reference form, or the raw candidate list. */
-  const resolveForm = (form) => {
-    if (candidates.some((candidate) => candidate.id === form)) return { id: form }
-    const found = candidates.filter((candidate) => candidate.id.startsWith(form))
-    if (found.length === 1) return { id: found[0].id }
-    if (found.length > 1) return { ambiguous: found }
-    return undefined
-  }
-  let resolved = resolveForm(normalized)
+  const { candidates, exhaustive } = await sessionRefCandidates(ctx, caller, options)
+  const ids = candidates.map((candidate) => candidate.id)
+  const forms = normalized.startsWith('session-') ? [normalized] : [normalized, `session-${normalized}`]
+  const exactId = forms.find((form) => ids.includes(form))
+  if (exactId !== undefined) return { id: exactId, candidate: candidates.find((candidate) => candidate.id === exactId) }
+  let resolved = matchSessionRef(ids, normalized, { minPrefixChars: 8 })
   // GUI/API surfaces often show the bare uuid while DSH session ids carry the
   // `session-` scheme; accept that form too when the full id form misses.
-  if (resolved === undefined && !normalized.startsWith('session-')) resolved = resolveForm(`session-${normalized}`)
-  if (resolved === undefined) return normalized
+  if ((resolved.missing || resolved.tooShort) && forms.length > 1) {
+    resolved = matchSessionRef(ids, forms[1], { minPrefixChars: 8 })
+  }
+  if (resolved.tooShort) {
+    throw new Error(`session reference "${normalized}" is too short; use at least 8 characters of the variable id part (excluding session-) or call session_list`)
+  }
   if (resolved.ambiguous !== undefined) {
-    const sample = resolved.ambiguous.slice(0, 5).map((match) => match.id.slice(0, 'session-'.length + 8)).join(', ')
+    const sample = resolved.ambiguous.slice(0, 5).map((id) => id.slice(0, 'session-'.length + 8)).join(', ')
     throw new Error(
       `session reference "${normalized}" is ambiguous: it matches ${resolved.ambiguous.length} sessions (${sample}${resolved.ambiguous.length > 5 ? ', ...' : ''}); use a longer prefix`,
     )
   }
-  return resolved.id
+  if (resolved.id !== undefined) {
+    return { id: resolved.id, candidate: candidates.find((candidate) => candidate.id === resolved.id) }
+  }
+  if (!exhaustive && isFullSessionId(normalized)) {
+    return { id: `session-${normalized.replace(/^session-/i, '')}`, candidate: undefined }
+  }
+  throw new Error(`no session matching "${normalized}" on this host; call session_list${exhaustive ? '' : ' or use a canonical full session id when enumeration is unavailable'}`)
+}
+
+/** Resolve a reference when the caller needs only the session id. */
+async function resolveSessionRef(ctx, caller, rawRef, options = {}) {
+  return (await resolveSessionRefInfo(ctx, caller, rawRef, options)).id
 }
 
 // ── Presence: "which sessions can I talk to, and who are they" ──────────────
@@ -336,7 +317,7 @@ async function peerRows(ctx, caller, limit, signal) {
     const info = describeSession(ctx, agent)
     rows.set(info.id, {
       id: info.id,
-      active: info.status === 'running',
+      active: true,
       status: info.status,
       flavor: 'dsh',
       name: info.title ?? info.cwd ?? info.id.slice(0, 8),
@@ -413,7 +394,11 @@ function inspectMessages(events, limit) {
       text: clipped,
     }
     if (typeof event.time === 'number') entry.time = event.time
-    if (event.type === 'user/message' && event.data?.source?.kind === 'agent-message') entry.fromAgent = true
+    if (event.type === 'user/message' && event.data?.source?.kind === 'agent-message') {
+      entry.fromAgent = true
+      const senderSessionId = event.data.source.senderSessionId
+      if (typeof senderSessionId === 'string' && senderSessionId.trim() !== '') entry.senderSessionId = senderSessionId
+    }
     messages.push(entry)
     bytes += Buffer.byteLength(clipped, 'utf8')
   }
@@ -425,7 +410,7 @@ function inspectMessages(events, limit) {
  * Read one session's metadata and recent message text from the host session
  * corpus. Read-only: it never resumes, wakes, or mutates the target.
  */
-async function inspectSession(ctx, sessionId, messageLimit) {
+async function inspectSession(ctx, sessionId, messageLimit, { callerCwd, scope, candidate, signal } = {}) {
   const query = ctx.get('sessionQuery')
   if (typeof query?.readSession !== 'function') {
     throw new Error('session_inspect requires the host session-query service, which this deployment does not compose')
@@ -433,11 +418,14 @@ async function inspectSession(ctx, sessionId, messageLimit) {
   const liveAgent = ctx.agents.get(sessionId)
   let loaded
   try {
-    loaded = await query.readSession(sessionId)
+    loaded = await query.readSession(sessionId, signal)
   } catch (error) {
     throw new Error(`cannot read session "${sessionId}": ${error instanceof Error ? error.message : String(error)}`)
   }
-  const header = loaded?.session ?? {}
+  const header = loaded?.session?.header ?? loaded?.session ?? {}
+  if (header.origin === 'subagent' || (liveAgent !== undefined && !isOrdinarySessionRoot(ctx, liveAgent))) {
+    throw new Error(`cannot inspect session "${sessionId}": session is owned by subagent or teammate routing`)
+  }
   const events = Array.isArray(loaded?.events) ? loaded.events : []
   let title
   for (let index = events.length - 1; index >= 0; index--) {
@@ -446,22 +434,19 @@ async function inspectSession(ctx, sessionId, messageLimit) {
     if (typeof candidate === 'string' && candidate.trim() !== '') title = candidate
     break
   }
-  let persisted = false
-  try {
-    const records = await query.listSessions()
-    const record = Array.isArray(records) ? records.find((item) => item?.header?.id === sessionId) : undefined
-    if (record !== undefined) persisted = record.persisted === true
-  } catch {
-    // Status hints are optional; the log read above already succeeded.
-  }
-  const { messages, truncated } = inspectMessages(events, messageLimit)
+  const persisted = candidate?.persisted === true
+  const targetCwd = typeof header.cwd === 'string' && header.cwd.trim() !== '' ? header.cwd : candidate?.cwd
   const lastEvent = events.at(-1)
   const session = { id: sessionId, live: liveAgent !== undefined, persisted }
   if (title !== undefined) session.title = title
-  if (typeof header.cwd === 'string') session.cwd = header.cwd
+  if (typeof targetCwd === 'string') session.cwd = targetCwd
   if (liveAgent !== undefined && typeof liveAgent.status === 'string') session.status = liveAgent.status
   if (typeof header.createdAt === 'number') session.createdAt = header.createdAt
   if (typeof lastEvent?.time === 'number') session.updatedAt = lastEvent.time
+  if (!cwdAllowed(scope, callerCwd, targetCwd)) {
+    return { session, messages: [], truncated: false, redacted: true }
+  }
+  const { messages, truncated } = inspectMessages(events, messageLimit)
   return { session, messages, truncated }
 }
 
@@ -494,16 +479,21 @@ async function resumeSetup(ctx, observation, selection) {
  * Resolve a session id to a live agent, cold-resuming a stored ordinary session
  * when the host composes the services that own that policy.
  */
-async function resolveTargetAgent(ctx, sessionId) {
+async function resolveTargetAgent(ctx, sessionId, signal) {
   const live = ctx.agents.get(sessionId)
-  if (live !== undefined) return { agent: live, cold: false }
+  if (live !== undefined) {
+    if (!isOrdinarySessionRoot(ctx, live)) {
+      return { agent: undefined, cold: false, reason: 'session is owned by subagent or teammate routing' }
+    }
+    return { agent: live, cold: false }
+  }
   const controller = ctx.get('sessionController')
   if (typeof controller?.resolveAgent === 'function') {
     // The web Session Controller owns ordinary-session resume policy (preset,
     // model selection, de-duplication). Prefer it whenever the deployment
     // composes it; the manual composition below is the portable fallback.
     try {
-      const result = await controller.resolveAgent(sessionId)
+      const result = await controller.resolveAgent(sessionId, signal)
       if (result?.agent !== undefined) return { agent: result.agent, cold: true }
       return {
         agent: undefined,
@@ -514,6 +504,24 @@ async function resolveTargetAgent(ctx, sessionId) {
       return { agent: undefined, cold: false, reason: `session is not live and resume failed (${String(error)})` }
     }
   }
+  let pending = fallbackResumes.get(ctx)
+  if (pending === undefined) {
+    pending = new Map()
+    fallbackResumes.set(ctx, pending)
+  }
+  const existing = pending.get(sessionId)
+  if (existing !== undefined) return await existing
+  const resume = resumeStoredSession(ctx, sessionId, signal)
+  pending.set(sessionId, resume)
+  try {
+    return await resume
+  } finally {
+    pending.delete(sessionId)
+  }
+}
+
+/** Cold-resume one stored ordinary session when no session controller is available. */
+async function resumeStoredSession(ctx, sessionId, signal) {
   const sessionQuery = ctx.get('sessionQuery')
   const defaults = ctx.get('agentDefaultModel')
   if (typeof sessionQuery?.observeSession !== 'function' || typeof defaults?.currentSelection !== 'function') {
@@ -521,7 +529,7 @@ async function resolveTargetAgent(ctx, sessionId) {
   }
   let observation
   try {
-    observation = await sessionQuery.observeSession(sessionId)
+    observation = await sessionQuery.observeSession(sessionId, { signal })
   } catch (error) {
     return { agent: undefined, cold: false, reason: `session is not live and its stored log could not be read (${String(error)})` }
   }
@@ -560,28 +568,46 @@ async function resolveTargetAgent(ctx, sessionId) {
 }
 
 /** Deliver one already-composed message body into a peer session. */
-async function deliver(ctx, caller, targetRef, bodyText, budget, kind) {
-  const targetId = await resolveSessionRef(ctx, caller, targetRef, { excludeCaller: true })
+async function deliver(ctx, caller, targetRef, bodyText, options, kind, signal) {
+  const { budget, scope, loopGuard } = options
+  signal?.throwIfAborted()
+  if (normalizeSessionRef(targetRef) === caller.id) throw new Error('session_send cannot target the calling session itself')
+  const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, caller, targetRef, { excludeCaller: true, signal })
   if (targetId === caller.id) throw new Error('session_send cannot target the calling session itself')
   if (byteLength(bodyText) > budget) {
     throw new Error(`message exceeds the ${budget}-byte budget; shorten it or split the work`)
   }
-  const resolved = await resolveTargetAgent(ctx, targetId)
+  const callerCwd = caller.session.header.cwd
+  const targetCwd = candidate?.cwd
+  if (!cwdAllowed(scope, callerCwd, targetCwd)) {
+    const reason = typeof targetCwd !== 'string' || targetCwd.trim() === ''
+      ? 'cannot verify the target workspace'
+      : 'target workspace is outside the allowed scope or the caller workspace cannot be verified'
+    throw new Error(`cannot send to session "${targetId}": ${reason} (scope: ${scope.mode}, caller workspace: ${JSON.stringify(callerCwd ?? 'unknown')}, target workspace: ${JSON.stringify(targetCwd ?? 'unknown')}); configure allowCwds for a known target workspace or scope: 'host'`)
+  }
+  signal?.throwIfAborted()
+  loopGuard.check(caller.id, targetId)
+  const resolved = await resolveTargetAgent(ctx, targetId, signal)
   if (resolved.agent === undefined) {
     throw new Error(`cannot reach session "${targetId}": ${resolved.reason}. Call session_list to see the sessions that are live.`)
   }
   const target = resolved.agent
   const sender = describeSession(ctx, caller)
   const targetInfo = describeSession(ctx, target)
-  const header = `${MARKER} ${kind === 'handoff' ? 'Handoff' : 'Message'} from DSH session ${JSON.stringify(sender.id)}`
-    + `${sender.title === undefined ? '' : ` (${JSON.stringify(sender.title)})`}`
-    + `${sender.cwd === undefined ? '' : `\nSender workspace: ${sender.cwd}`}`
-  const content = [textBlock(header), textBlock(bodyText)]
+  const content = [textBlock(peerMessageText({
+    kind,
+    senderId: sender.id,
+    senderTitle: sender.title,
+    senderCwd: sender.cwd,
+    body: bodyText,
+  }))]
   const message = createUserMessage({
     content,
     source: { kind: 'agent-message', form: 'relay', senderSessionId: caller.id },
   })
+  signal?.throwIfAborted()
   target.steer(message)
+  loopGuard.note(caller.id, targetId)
   try {
     // Flush the target's committed session events before the sender reports
     // success. The steering itself becomes durable when the target's driver
@@ -668,15 +694,18 @@ const inspectOutput = jsonOutput({
           time: { type: 'number' },
           text: { type: 'string', required: true },
           fromAgent: { type: 'boolean' },
+          senderSessionId: { type: 'string' },
         },
       },
     },
     truncated: { type: 'boolean', required: true },
+    redacted: { type: 'boolean' },
   },
 })
 
 /** Local bridge tools (our canonical interface). */
-function localToolDefinitions(ctx, agent, budget) {
+function localToolDefinitions(ctx, agent, options) {
+  const { scope } = options
   return [
     defineTool({
       name: 'session_list',
@@ -730,7 +759,7 @@ function localToolDefinitions(ctx, agent, budget) {
       }),
       async execute(_args, exec) {
         const self = describeSession(ctx, agent)
-        const stored = await listStoredPeers(ctx, agent, exec.signal)
+        const stored = await listStoredPeers(ctx, agent, exec?.signal)
         return {
           self: { id: self.id, ...(self.title === undefined ? {} : { title: self.title }), ...(self.cwd === undefined ? {} : { cwd: self.cwd }) },
           sessions: listPeers(ctx, agent),
@@ -754,10 +783,10 @@ function localToolDefinitions(ctx, agent, budget) {
         },
       },
       output: inspectOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
-        const targetId = await resolveSessionRef(ctx, agent, args.target, { allPersisted: true })
-        return await inspectSession(ctx, targetId, limit)
+        const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.target, { allPersisted: true, signal: exec?.signal })
+        return await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate, signal: exec?.signal })
       },
     }),
     defineTool({
@@ -780,10 +809,10 @@ function localToolDefinitions(ctx, agent, budget) {
         additionalProperties: false,
         properties: targetResultProperties,
       }),
-      async execute(args) {
+      async execute(args, exec) {
         const body = args.message
         if (typeof body !== 'string' || body.trim() === '') throw new Error('message must be non-empty text')
-        return await deliver(ctx, agent, args.target, body, budget, 'message')
+        return await deliver(ctx, agent, args.target, body, options, 'message', exec?.signal)
       },
     }),
     defineTool({
@@ -815,11 +844,11 @@ function localToolDefinitions(ctx, agent, budget) {
         additionalProperties: false,
         properties: targetResultProperties,
       }),
-      async execute(args) {
+      async execute(args, exec) {
         if (typeof args.summary !== 'string' || args.summary.trim() === '') throw new Error('summary must be non-empty text')
         if (typeof args.task !== 'string' || args.task.trim() === '') throw new Error('task must be non-empty text')
         const body = handoffBody({ summary: args.summary, task: args.task, reply: args.reply, senderId: agent.id })
-        return await deliver(ctx, agent, args.target, body, budget, 'handoff')
+        return await deliver(ctx, agent, args.target, body, options, 'handoff', exec?.signal)
       },
     }),
   ]
@@ -875,6 +904,7 @@ const hapiInspectOutput = jsonOutput({
       },
     },
     truncated: { type: 'boolean', required: true },
+    redacted: { type: 'boolean' },
   },
 })
 
@@ -897,7 +927,8 @@ const hapiPrefixParameter = {
 }
 
 /** HAPI-compatible tools backed by this host's own DSH sessions. */
-function localCompatToolDefinitions(ctx, agent, budget) {
+function localCompatToolDefinitions(ctx, agent, options) {
+  const { scope } = options
   return [
     defineTool({
       name: 'list_peers',
@@ -908,7 +939,7 @@ function localCompatToolDefinitions(ctx, agent, budget) {
       output: hapiListOutput,
       async execute(args, exec) {
         const limit = clampPeerLimit(args.limit)
-        const rows = await peerRows(ctx, agent, limit, exec.signal)
+        const rows = await peerRows(ctx, agent, limit, exec?.signal)
         return {
           peers: rows.map((row) => ({
             id: row.id,
@@ -931,8 +962,8 @@ function localCompatToolDefinitions(ctx, agent, budget) {
       output: hapiInspectOutput,
       async execute(args, exec) {
         const limit = clampMessageLimit(args.messageLimit)
-        const targetId = await resolveSessionRef(ctx, agent, args.sessionIdPrefix, { allPersisted: true, signal: exec?.signal })
-        const inspected = await inspectSession(ctx, targetId, limit)
+        const { id: targetId, candidate } = await resolveSessionRefInfo(ctx, agent, args.sessionIdPrefix, { allPersisted: true, signal: exec?.signal })
+        const inspected = await inspectSession(ctx, targetId, limit, { callerCwd: agent.session.header.cwd, scope, candidate, signal: exec?.signal })
         const session = inspected.session
         return {
           sessionId: session.id,
@@ -945,6 +976,7 @@ function localCompatToolDefinitions(ctx, agent, budget) {
           ...(session.updatedAt === undefined ? {} : { updatedAt: session.updatedAt }),
           messages: inspected.messages.map((message) => ({ role: message.role, text: message.text })),
           truncated: inspected.truncated,
+          ...(inspected.redacted === undefined ? {} : { redacted: inspected.redacted }),
         }
       },
     }),
@@ -956,10 +988,10 @@ function localCompatToolDefinitions(ctx, agent, budget) {
         message: { type: 'string', required: true, description: 'Message text to deliver to the target session.' },
       },
       output: hapiPingOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const body = args.message
         if (typeof body !== 'string' || body.trim() === '') throw new Error('message must be non-empty text')
-        const result = await deliver(ctx, agent, args.sessionIdPrefix, body, budget, 'message')
+        const result = await deliver(ctx, agent, args.sessionIdPrefix, body, options, 'message', exec?.signal)
         const targetId = result.target.id
         return {
           delivered: true,
@@ -973,7 +1005,8 @@ function localCompatToolDefinitions(ctx, agent, budget) {
 }
 
 /** HAPI hub tools: same names, but addressed to a HAPI hub. */
-function hubToolDefinitions(ctx, agent, budget, client) {
+function hubToolDefinitions(ctx, agent, options) {
+  const { budget, hubClient: client, loopGuard } = options
   return [
     defineTool({
       name: 'list_peers',
@@ -982,9 +1015,9 @@ function hubToolDefinitions(ctx, agent, budget, client) {
         limit: { type: 'integer', description: 'Max sessions to return (default 30, HAPI max 100).' },
       },
       output: hapiListOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const limit = clampPeerLimit(args.limit)
-        const peers = await client.listPeers({ limit })
+        const peers = await client.listPeers({ limit, signal: exec?.signal })
         return { peers, total: peers.length }
       },
     }),
@@ -1023,17 +1056,22 @@ function hubToolDefinitions(ctx, agent, budget, client) {
         const replyLine = client.selfSessionId === undefined
           ? 'The sending DSH session is not itself a HAPI session and cannot receive HAPI messages; leave any reply in this conversation and it will be read with inspect_peer.'
           : `To reply, use HAPI ping_peer with sessionIdPrefix ${client.selfSessionId} (this DSH session runs under HAPI as that session).`
-        const prefixed = `${MARKER} Agent message from DSH session ${JSON.stringify(sender.id)}`
-          + `${sender.title === undefined ? '' : ` (${JSON.stringify(sender.title)})`}`
-          + `${sender.cwd === undefined ? '' : `\nSender workspace: ${sender.cwd}`}`
-          + '\nThis is an automated agent-to-agent message, not a message from the human user. '
-          + replyLine
-          + `\n\n${body}`
+        const prefixed = peerMessageText({
+          kind: 'message',
+          senderId: sender.id,
+          senderTitle: sender.title,
+          senderCwd: sender.cwd,
+          body,
+          extraLines: [`This is an automated agent-to-agent message, not a message from the human user. ${replyLine}`],
+        })
+        const targetKey = normalizeSessionRef(args.sessionIdPrefix)
+        loopGuard.check(agent.id, targetKey)
         const result = await client.pingPeer({
           sessionIdPrefix: args.sessionIdPrefix,
           message: prefixed,
-          signal: exec.signal,
+          signal: exec?.signal,
         })
+        loopGuard.note(agent.id, targetKey)
         return {
           delivered: true,
           sessionId: result.sessionId,
@@ -1059,7 +1097,7 @@ function clampPeerLimit(value) {
 
 /** Register the bridge tools and prompt section in one exact agent scope. */
 function install(agent, ctx, options) {
-  const { budget, compat, hubClient } = options
+  const { compat, hubClient } = options
   const scoped = agent.ctx
   const disposers = []
   const register = (disposer) => { disposers.push(disposer) }
@@ -1069,13 +1107,13 @@ function install(agent, ctx, options) {
       order: 130,
       text: () => policyText(agent.id, compat),
     }))
-    for (const tool of localToolDefinitions(ctx, agent, budget)) register(scoped.tools.register(tool))
+    for (const tool of localToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     if (compat?.mode === 'local') {
-      for (const tool of localCompatToolDefinitions(ctx, agent, budget)) register(scoped.tools.register(tool))
+      for (const tool of localCompatToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     }
     if (compat?.mode === 'hub') {
       if (hubClient === undefined) throw new Error('HAPI hub compatibility was requested but the hub client is unavailable')
-      for (const tool of hubToolDefinitions(ctx, agent, budget, hubClient)) register(scoped.tools.register(tool))
+      for (const tool of hubToolDefinitions(ctx, agent, options)) register(scoped.tools.register(tool))
     }
   } catch (error) {
     for (const dispose of disposers.reverse()) dispose()
@@ -1093,7 +1131,9 @@ export function apply(ctx, config = {}) {
     return
   }
   const budget = messageBudgetOf(config)
-  const compat = compatibilityOf(config)
+  const scope = normalizeScope(config)
+  const loopGuard = createLoopGuard(config)
+  let compat = compatibilityOf(config)
   let hubClient
   if (compat?.mode === 'hub') {
     try {
@@ -1101,11 +1141,14 @@ export function apply(ctx, config = {}) {
       compat.hubUrl = hubClient.apiUrl
       if (hubClient.selfSessionId !== undefined) compat.selfSessionId = hubClient.selfSessionId
     } catch (error) {
-      ctx.logger?.warn?.(`session-bridge: HAPI hub client unavailable (${error instanceof Error ? error.message : String(error)}); falling back to HAPI-compatible local aliases`)
-      compat.mode = 'local'
+      const fallback = compat.explicit === true
+        ? 'HAPI-compatible aliases disabled; native session_* tools remain available'
+        : 'falling back to HAPI-compatible local aliases'
+      ctx.logger?.warn?.(`session-bridge: HAPI hub client unavailable (${error instanceof Error ? error.message : String(error)}); ${fallback}`)
+      compat = compat.explicit === true ? null : { mode: 'local' }
     }
   }
-  const options = { budget, compat, hubClient }
+  const options = { budget, compat, hubClient, scope, loopGuard }
   const installed = new Map()
   const maybeInstall = (agent) => {
     if (installed.has(agent) || !isOrdinarySessionRoot(ctx, agent)) return

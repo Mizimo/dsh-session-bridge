@@ -13,8 +13,7 @@
 #      dsh.profile.bundles from the installed state.
 #
 # IMPORTANT: bundle membership is read at startup, so restart the test instance
-# afterwards (the plugin's cordis rows can hot-reload, but the bundle layer list
-# cannot):
+# afterwards (bundle membership is read at process startup):
 #   ./stop-test-instance.sh && ./start-test-instance.sh
 #
 # The bundle directory must be a pnpm package whose package.json declares:
@@ -25,13 +24,17 @@
 set -euo pipefail
 
 BASE="${TEST_BASE:-$HOME/session-bridge-test}"
-DSH_BIN="${DSH_BIN:-$HOME/.npm/_npx/7eff65a5cfe9d1d1/node_modules/.bin/dsh}"
+if [ "${DSH_BIN+x}" != x ]; then
+  DSH_BIN="$(command -v dsh || true)"
+fi
 SPEC="${1:-}"
 
 die() { echo "install-plugin-bundle: ERROR: $*" >&2; exit 1; }
 info() { echo "install-plugin-bundle: $*"; }
 
 [ -n "$SPEC" ] || die "usage: install-plugin-bundle.sh <abs-bundle-dir | file:<dir> | npm-spec>"
+[ -n "$DSH_BIN" ] || die "dsh not found on PATH; set DSH_BIN=/absolute/path/to/dsh"
+[ -x "$DSH_BIN" ] || die "dsh is not executable: $DSH_BIN; set DSH_BIN=/absolute/path/to/dsh"
 [ -d "$BASE/home/profiles/web" ] || die "isolated profile missing; run start-test-instance.sh first"
 command -v pnpm >/dev/null 2>&1 || [ -x "$HOME/.local/bin/pnpm" ] || die "pnpm not found (needed by 'dsh plugin')"
 

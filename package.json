@@ -13,6 +13,8 @@
   },
   "files": [
     "index.js",
+    "config.js",
+    "policy.js",
     "hapi-hub.js",
     "refs.js",
     "cordis.patch.yml",
@@ -45,7 +47,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --import ./test-support/register.mjs --test"
   },
   "dsh": {
     "bundle": {
